@@ -55,8 +55,6 @@ navybrowser/
 │       ├── panel.css           Theme colors, keyframes, & dropdowns
 │       ├── panel.js            Sidebar event listeners & timeline builder
 │       └── icon{16,48,128}.png Resized ship's anchor theme icons
-├── docs/
-│   └── THREAT_MODEL.md         Privacy and security constraints
 └── README.md                   This documentation
 ```
 
@@ -70,13 +68,53 @@ navybrowser/
 3. Click **Load unpacked** (top-left) and select the `extension/` folder inside this repository.
 4. The **Navy** anchor icon will appear in your extensions list.
 
-### 2. Configure Your LLM
+### 2. Configure Your LLM & Environment Variables
 1. Click the Navy anchor icon in the toolbar or open it via the Side Panel dropdown.
 2. Click the gear icon (**⚙**) in the top-right corner to open **Agent Settings**.
 3. Configure your endpoint:
    - **Local Ollama (Offline)**: Keep the default URL (`http://127.0.0.1:11434/v1`) or point to llama.cpp. Ensure `ollama serve` is running in your terminal.
    - **Cloud Claude (Recommended)**: Paste your Anthropic API Key (e.g. `sk-ant-...`) in the API Key input.
 4. Click **Save Settings**.
+
+#### Setting Terminal Environment Variables (All OS)
+To connect the Chrome extension to a local Ollama server, you must configure Cross-Origin Resource Sharing (CORS) by setting the `OLLAMA_ORIGINS` environment variable before running Ollama:
+
+##### 💻 Windows (PowerShell)
+* **Temporary (Current terminal only)**:
+  ```powershell
+  $env:OLLAMA_ORIGINS="chrome-extension://*"
+  ollama serve
+  ```
+* **Permanent (User environment)**:
+  ```powershell
+  [System.Environment]::SetEnvironmentVariable("OLLAMA_ORIGINS", "chrome-extension://*", "User")
+  # Restart PowerShell/Ollama for the changes to take effect
+  ```
+
+##### 💻 Windows (Command Prompt - CMD)
+* **Temporary (Current command prompt only)**:
+  ```cmd
+  set OLLAMA_ORIGINS=chrome-extension://*
+  ollama serve
+  ```
+* **Permanent**:
+  ```cmd
+  setx OLLAMA_ORIGINS "chrome-extension://*"
+  # Restart CMD/Ollama for the changes to take effect
+  ```
+
+##### 🍎 macOS & 🐧 Linux (Bash / Zsh)
+* **Temporary (Current terminal only)**:
+  ```bash
+  export OLLAMA_ORIGINS="chrome-extension://*"
+  ollama serve
+  ```
+* **Permanent**:
+  Append the export command to your shell configuration file (e.g., `~/.zshrc`, `~/.bashrc`, or `~/.bash_profile`):
+  ```bash
+  echo 'export OLLAMA_ORIGINS="chrome-extension://*"' >> ~/.zshrc
+  source ~/.zshrc
+  ```
 
 ### 3. Run a Task
 1. Navigate to any target website.
