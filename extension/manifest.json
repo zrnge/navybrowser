@@ -1,0 +1,64 @@
+{
+  "manifest_version": 3,
+  "name": "Navy",
+  "version": "0.1.0",
+  "author": "Zrnge",
+  "homepage_url": "https://github.com/zrnge/navybrowser",
+  "description": "Privacy-first browser automation driven by your local AI. No data leaves your machine.",
+
+  "permissions": [
+    "debugger",
+    "scripting",
+    "sidePanel",
+    "tabs",
+    "activeTab",
+    "storage",
+    "alarms"
+  ],
+
+  "host_permissions": [
+    "https://*/*",
+    "http://*/*"
+  ],
+
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+
+  "action": {
+    "default_title": "Navy",
+    "default_icon": {
+      "16": "ui/icon16.png",
+      "48": "ui/icon48.png",
+      "128": "ui/icon128.png"
+    }
+  },
+
+  "side_panel": {
+    "default_path": "ui/panel.html"
+  },
+
+  "commands": {
+    "panic-stop": {
+      "suggested_key": {
+        "default": "Ctrl+Shift+Period",
+        "mac": "Command+Shift+Period"
+      },
+      "description": "Panic stop — immediately abort any running agent task"
+    },
+    "toggle-side-panel": {
+      "suggested_key": {
+        "default": "Ctrl+Shift+L",
+        "mac": "Command+Shift+L"
+      },
+      "description": "Open/close the agent side panel"
+    }
+  },
+
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'; connect-src http://127.0.0.1:* https://api.anthropic.com"
+  },
+
+  "minimum_chrome_version": "116"
+}

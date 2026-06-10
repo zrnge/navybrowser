@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Navy Browser Agent</title>
+<link rel="stylesheet" href="panel.css">
+</head>
+<body>
+
+<header class="hdr">
+  <div class="hdr-top">
+    <div class="brand">
+      <svg class="brand-logo" viewBox="0 0 24 24" width="20" height="20">
+        <!-- Anchor logo in glowing aqua -->
+        <path d="M12,2 A3,3 0 0,0 9,5 A3,3 0 0,0 11,7.8 L11,9 L6,9 A1,1 0 0,0 5,10 A1,1 0 0,0 6,11 L11,11 L11,16.1 A6,6 0 0,1 6.2,12 L7.5,12 A1,1 0 0,0 8.5,11 A1,1 0 0,0 7.5,10 L4,10 A1,1 0 0,0 3,11 L3,14.5 A1,1 0 0,0 4,15.5 A1,1 0 0,0 5,14.5 L5,13.8 A8,8 0 0,0 11,18.1 L11,21 A1,1 0 0,0 12,22 A1,1 0 0,0 13,21 L13,18.1 A8,8 0 0,0 19,13.8 L19,14.5 A1,1 0 0,0 20,15.5 A1,1 0 0,0 21,14.5 L21,11 A1,1 0 0,0 20,10 L16.5,10 A1,1 0 0,0 15.5,11 A1,1 0 0,0 16.5,12 L17.8,12 A6,6 0 0,1 13,16.1 L13,11 L18,11 A1,1 0 0,0 19,10 A1,1 0 0,0 18,9 L13,9 L13,7.8 A3,3 0 0,0 15,5 A3,3 0 0,0 12,2 Z M12,4 A1,1 0 1,1 12,6 A1,1 0 1,1 12,4 Z" fill="var(--accent-aqua)" />
+      </svg>
+      <span class="brand-name">Navy</span>
+      <span class="dot" id="statusDot"></span>
+    </div>
+    <div class="hdr-actions">
+      <button type="button" id="advancedToggle" class="settings-toggle-btn" title="Advanced settings">⚙</button>
+    </div>
+  </div>
+  
+  <div class="model-row">
+    <div class="model-selector-wrap">
+      <select id="modelSelect" class="model-select" title="Active LLM model" aria-label="Active LLM model" disabled>
+        <option value="">— connect first —</option>
+      </select>
+      <span class="selector-arrow">▼</span>
+    </div>
+    <button type="button" id="applyModelBtn" class="apply-btn" disabled>Apply</button>
+    <button type="button" id="refreshBtn" class="refresh-btn" title="Re-check connection">↺</button>
+  </div>
+</header>
+
+<!-- Connection bar (sub-header status) -->
+<div class="conn-bar">
+  <div class="conn-item">
+    <span class="conn-dot" id="orchDot"></span>
+    <span class="conn-label">Engine:</span>
+    <span class="conn-val" id="orchVal">active</span>
+  </div>
+  <div class="conn-item">
+    <span class="conn-dot" id="llmDot"></span>
+    <span class="conn-label">LLM:</span>
+    <span class="conn-val" id="llmVal">offline</span>
+  </div>
+</div>
+
+<!-- Error banner — shown when LLM is unreachable -->
+<div id="errorBanner" class="error-banner hidden"></div>
+
+<!-- Context window (budget progress) — visible while a task is running -->
+<section class="ctx-section hidden" id="ctxSection">
+  <div class="ctx-top">
+    <h2>Budget Context</h2>
+    <span class="ctx-steps" id="ctxSteps">step 0 / 25</span>
+  </div>
+  <div class="ctx-row" style="margin-bottom: 6px;">
+    <div class="ctx-bar-wrap">
+      <div class="ctx-bar" id="ctxBar"></div>
+    </div>
+    <span class="ctx-label" id="ctxLabel">0 / 200,000 tokens</span>
+  </div>
+  <div class="ctx-row hidden" id="subtaskProgressRow">
+    <div class="ctx-bar-wrap">
+      <div class="ctx-bar" id="subtaskBar" style="background: var(--accent-aqua);"></div>
+    </div>
+    <span class="ctx-label" id="subtaskLabel">Subtasks: 0 / 0</span>
+  </div>
+  <button type="button" id="copyResultBtn" class="hidden small-copy-btn">Copy Result</button>
+</section>
+
+<!-- Main scrollable chat history container -->
+<main class="chat-area">
+  <div id="log" class="chat-history"></div>
+  <div id="screenshotStrip" class="screenshot-strip hidden"></div>
+</main>
+
+<!-- Agent Settings drawer overlay -->
+<section class="setup hidden" id="setupPanel">
+  <div class="setup-header">
+    <h2>Agent Settings</h2>
+    <button type="button" id="closeSettingsBtn" class="close-settings-btn" title="Close settings">×</button>
+  </div>
+  
+  <div class="setup-body">
+    <div class="form-group">
+      <label class="model-label">LLM Endpoint URL</label>
+      <input type="text" id="baseUrlInput" placeholder="http://127.0.0.1:11434/v1" autocomplete="off">
+    </div>
+    
+    <div class="form-group">
+      <label class="model-label">Anthropic API Key (Optional)</label>
+      <input type="password" id="anthropicKeyInput" placeholder="sk-ant-..." autocomplete="off">
+    </div>
+    
+    <div class="form-row">
+      <div class="form-group flex-1">
+        <label class="model-label">Temperature</label>
+        <input type="number" id="tempInput" min="0" max="1" step="0.1" value="0.2">
+      </div>
+      <div class="form-group flex-1">
+        <label class="model-label">Max Steps</label>
+        <input type="number" id="maxStepsInput" min="1" max="200" value="100">
+      </div>
+    </div>
+    
+    <div class="form-group margin-top-12">
+      <label class="auto-label">
+        <input type="checkbox" id="uncensoredCheck"> Uncensored mode (bypass domain blocks)
+      </label>
+    </div>
+    
+    <div class="setup-actions">
+      <button type="button" id="saveSettingsBtn" class="save-settings-btn">Save Settings</button>
+    </div>
+    
+    <div id="settingsStatus" class="status-line"></div>
+  </div>
+</section>
+
+<!-- Bottom input/chat controls -->
+<footer class="chat-input-area">
+  <div id="currentTab" class="status-line"></div>
+  
+  <div class="input-card">
+    <textarea id="goalInput" rows="2" placeholder="Ask Navy to do something..."></textarea>
+    
+    <div class="input-controls">
+      <!-- Ask before acting dropdown select -->
+      <div class="control-dropdown-wrap">
+        <select id="autoApproveSelect" title="Action Confirmation Policy" aria-label="Action Confirmation Policy">
+          <option value="ask">Ask before acting</option>
+          <option value="auto">Auto-approve actions</option>
+        </select>
+        <span class="select-arrow">▼</span>
+      </div>
+      
+      <!-- Hidden checkbox to map back to original panel.js bindings -->
+      <input type="checkbox" id="autoApproveCheck" style="display:none;">
+      
+      <div class="input-actions">
+        <!-- Stop Button -->
+        <button type="button" id="stopBtn" class="stop-btn hidden" title="Stop task (Ctrl+Shift+.)">
+          <svg viewBox="0 0 24 24" class="btn-icon" width="14" height="14">
+            <rect x="5" y="5" width="14" height="14" rx="2" fill="currentColor"/>
+          </svg>
+        </button>
+        <!-- Run Button -->
+        <button type="button" id="runBtn" class="run-btn" title="Run on current tab">
+          <svg viewBox="0 0 24 24" class="btn-icon" width="14" height="14" fill="none">
+            <path d="M5,12 L19,12 M13,5 L19,12 L13,19" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </button>
+      </div>
+    </div>
+  </div>
+  
+  <div class="disclaimer">
+    Navy is AI and can make mistakes. Please double-check responses.
+    <div class="dev-links">
+      Developer: <a href="https://zrnge.github.io" target="_blank" rel="noopener">Zrnge</a> | 
+      Repo: <a href="https://github.com/zrnge/navybrowser" target="_blank" rel="noopener">github.com/zrnge/navybrowser</a>
+    </div>
+  </div>
+</footer>
+
+<!-- Permissions popup dialog (slide-up style) -->
+<div id="dialog" class="dialog hidden">
+  <div class="dialog-card">
+    <div class="dialog-header">
+      <span class="dialog-icon">🔒</span>
+      <span id="dialogTitle" class="dialog-title">New permissions required</span>
+    </div>
+    
+    <div id="dialogBody" class="dialog-body">Navy wants to navigate to: www.youtube.com</div>
+    
+    <input id="dialogInput" class="dialog-input hidden" type="text" placeholder="Type your answer here..." aria-label="Agent answer input" title="Your answer to the agent">
+    
+    <div class="dialog-actions">
+      <button type="button" id="dialogYes" class="dialog-yes-btn">Allow this action <span>↵</span></button>
+      <button type="button" id="dialogNo" class="dialog-no-btn">Decline <span>ESC</span></button>
+    </div>
+    
+    <div class="dialog-always-row">
+      <span class="always-text">Always allow actions on this site</span>
+      <span class="always-shortcut">Ctrl + ↵</span>
+    </div>
+    
+    <div class="dialog-footer">
+      Navy will not purchase items, create accounts, or bypass captchas without input. Revoke site permissions in settings.
+    </div>
+  </div>
+</div>
+
+<script src="panel.js"></script>
+</body>
+</html>

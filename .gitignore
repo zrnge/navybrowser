@@ -1,0 +1,31 @@
+# Local configuration / AI assistant permissions
+.claude/
+
+# Windows system files
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# macOS system files
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Local environment files / API keys
+.env
+.env.local
+.env.*.local
+*.env
+*.key
+*.pem
+
+# Log files
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Node / dependencies (if any are added in the future)
+node_modules/
+dist/
+build/
