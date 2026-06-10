@@ -144,6 +144,16 @@ node --check extension/security.js
 
 ---
 
+## Author & Developer
+
+Navy is designed, developed, and maintained by **Zrnge**.
+- **Personal Website / Portfolio**: [zrnge.github.io](https://zrnge.github.io)
+- **GitHub Repository**: [github.com/zrnge/navybrowser](https://github.com/zrnge/navybrowser)
+
+Feel free to star the repository, open issues, or submit pull requests!
+
+---
+
 ## License
 
 This project is licensed under the MIT License. Open source and yours to extend.
