@@ -2492,6 +2492,29 @@ async function actDrag(tabId, a) {
     dst = await resolveCoords(tabId, a.to_ref, a.to_x, a.to_y, "drag");
     if (dst.error) return { success: false, ...dst };
   }
+  let isChess = false;
+  try {
+    const { result } = await sendCDP(tabId, "Runtime.evaluate", {
+      expression: `!!document.querySelector('cg-board, #board, .cg-wrap cg-board, chess-board, [class*="chess-board"]')`,
+      returnByValue: true
+    });
+    isChess = !!(result && result.value);
+  } catch (_) {}
+
+  if (isChess) {
+    await showAgentCursor(tabId, src.x, src.y);
+    await synthClick(tabId, src.x, src.y);
+    await waitForDOMStability(tabId, 1500, 200);
+    await showAgentCursor(tabId, dst.x, dst.y);
+    await synthClick(tabId, dst.x, dst.y);
+    await waitForDOMStability(tabId, 3000, 600);
+    const tab2 = await chrome.tabs.get(tabId);
+    const fpAfter2 = await domFingerprint(tabId);
+    const diff2 = diffFingerprints(fpBefore, fpAfter2);
+    if (diff2.anyChange || tab2.url !== urlBefore) STATE.elementMapDirty = true;
+    return { success: true, action_type: "drag", url: tab2.url, title: tab2.title, page_changed: (tab2.url !== urlBefore) || diff2.anyChange, dom_diff: diff2.summary, method: "click_to_move" };
+  }
+
   await showAgentCursor(tabId, src.x, src.y);
   await synthDrag(tabId, src.x, src.y, dst.x, dst.y);
   // 600ms settle — gives CSS transition animations (kanban cards, game pieces, etc.) time to finish
