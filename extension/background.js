@@ -58,7 +58,9 @@ const STATE = {
   activeConfirmResolver: null,
   activeAnswerResolver: null,
   activeAgent: null,
-  cancelled: false
+  cancelled: false,
+  elementMapDirty: false,   // set true after any DOM change; forces element re-scan on next snapshot
+  inFlightRequests: new Set(), // active network requests in flight
 };
 
 let newTabHistoryEntry = null;
@@ -67,14 +69,23 @@ let watchdogInterval = null;
 function startWatchdog(tabId) {
   if (watchdogInterval) clearInterval(watchdogInterval);
   watchdogInterval = setInterval(async () => {
+    // Stop if the task ended or the active tab changed (another watchdog will handle it)
     if (!STATE.running || STATE.attachedTabId !== tabId) {
       clearInterval(watchdogInterval);
       watchdogInterval = null;
       return;
     }
+    // Probe the debugger connection; swallow the unchecked lastError warning by catching
     try {
       await sendCDP(tabId, "DOM.enable", {});
     } catch (e) {
+      // Only attempt reconnect for genuine connection loss, not for restricted URLs
+      let currentUrl = "";
+      try { currentUrl = (await chrome.tabs.get(tabId)).url || ""; } catch (_) {}
+      if (isRestrictedUrl(currentUrl)) {
+        console.warn("[agent] Watchdog: tab navigated to restricted URL, skipping reconnect");
+        return;
+      }
       console.warn("[agent] CDP watchdog ping failed, attempting reconnect...", e);
       try {
         await detachDebugger().catch(() => {});
@@ -90,27 +101,37 @@ function startWatchdog(tabId) {
 }
 
 chrome.tabs.onCreated.addListener(async (tab) => {
-  if (STATE.running && STATE.attachedTabId) {
-    const prevTabId = STATE.attachedTabId;
-    await sleep(1000);
-    let freshTab;
-    try { freshTab = await chrome.tabs.get(tab.id); } catch (_) { return; }
-    await detachDebugger().catch(() => {});
+  if (!STATE.running || !STATE.attachedTabId) return;
+  const prevTabId = STATE.attachedTabId;
+
+  // Wait briefly for the tab URL to settle (it starts as "about:blank")
+  await sleep(800);
+  let freshTab;
+  try { freshTab = await chrome.tabs.get(tab.id); } catch (_) { return; }
+
+  // Never try to attach the debugger to a restricted chrome:// or internal URL.
+  // If the new tab is restricted, stay on the previous tab unchanged.
+  if (isRestrictedUrl(freshTab.url)) {
+    console.log(`[agent] New tab ${tab.id} has restricted URL (${freshTab.url}), staying on tab ${prevTabId}`);
+    return;
+  }
+
+  await detachDebugger().catch(() => {});
+  try {
+    await attachDebugger(tab.id);
+    STATE.attachedTabId = tab.id;
+    newTabHistoryEntry = `New tab opened: ${freshTab.url || "about:blank"}. Continuing in new tab.`;
+    broadcastStatus({ event: "progress", step: 0, thought: newTabHistoryEntry, kind: "info" });
+    startWatchdog(tab.id);
+  } catch (e) {
+    console.error("[agent] Failed to attach debugger to newly created tab:", e);
+    // Restore debugger on the previous tab so the task can continue
     try {
-      await attachDebugger(tab.id);
-      STATE.attachedTabId = tab.id;
-      newTabHistoryEntry = `New tab opened: ${freshTab.url || "about:blank"}. Continuing in new tab.`;
-      broadcastStatus({ event: "progress", step: 0, thought: newTabHistoryEntry, kind: "info" });
-      startWatchdog(tab.id);
-    } catch (e) {
-      console.error("[agent] Failed to attach debugger to newly created tab:", e);
-      try {
-        await attachDebugger(prevTabId);
-        STATE.attachedTabId = prevTabId;
-        startWatchdog(prevTabId);
-      } catch (err) {
-        console.error("[agent] Failed to restore debugger to previous tab:", err);
-      }
+      await attachDebugger(prevTabId);
+      STATE.attachedTabId = prevTabId;
+      startWatchdog(prevTabId);
+    } catch (err) {
+      console.error("[agent] Failed to restore debugger to previous tab:", err);
     }
   }
 });
@@ -177,6 +198,21 @@ chrome.runtime.onConnect.addListener((port) => {
   });
 });
 
+chrome.debugger.onEvent.addListener((source, method, params) => {
+  if (!STATE.attachedTabId || source.tabId !== STATE.attachedTabId) return;
+  if (method === "Network.requestWillBeSent") {
+    // Only track XHR, Fetch, Document, and Script resource types to avoid getting clogged by media/images
+    if (["XHR", "Fetch", "Document", "Script"].includes(params.type)) {
+      STATE.inFlightRequests.add(params.requestId);
+    }
+  } else if (
+    method === "Network.loadingFinished" ||
+    method === "Network.loadingFailed"
+  ) {
+    STATE.inFlightRequests.delete(params.requestId);
+  }
+});
+
 function broadcastStatus(evt) {
   for (const port of STATE.panelClients) {
     try { port.postMessage(evt); } catch (_) {}
@@ -211,6 +247,60 @@ async function handlePanelMessage(msg, port) {
   }
 }
 
+// -- Session memory -----------------------------------------------------------
+// Tasks are stored in chrome.storage.local so they survive browser restarts.
+// We keep the last 20 records; each is a compact summary, not raw history.
+
+const SESSION_STORAGE_KEY = "navyTaskHistory";
+const SESSION_MAX_RECORDS = 20;
+
+async function saveTaskRecord(goal, result) {
+  try {
+    const { navyTaskHistory = [] } = await chrome.storage.local.get(SESSION_STORAGE_KEY);
+    const record = {
+      ts:     Math.floor(Date.now() / 1000),
+      goal:   goal.substring(0, 200),
+      ok:     result.success,
+      summary: (result.summary || result.reason || "").substring(0, 300),
+      answer:  result.finalAnswer ? result.finalAnswer.substring(0, 400) : null,
+      url:     result.url || null,
+      steps:   result.stepsTaken || 0,
+    };
+    navyTaskHistory.push(record);
+    // Keep only the most recent records
+    if (navyTaskHistory.length > SESSION_MAX_RECORDS) {
+      navyTaskHistory.splice(0, navyTaskHistory.length - SESSION_MAX_RECORDS);
+    }
+    await chrome.storage.local.set({ [SESSION_STORAGE_KEY]: navyTaskHistory });
+  } catch (e) {
+    console.warn("saveTaskRecord failed:", e);
+  }
+}
+
+async function loadSessionContext() {
+  try {
+    const { navyTaskHistory = [] } = await chrome.storage.local.get(SESSION_STORAGE_KEY);
+    if (navyTaskHistory.length === 0) return null;
+
+    const now = Math.floor(Date.now() / 1000);
+    // Build a compact summary of up to the last 8 tasks
+    const recent = navyTaskHistory.slice(-8).map(r => {
+      const agoSec = now - r.ts;
+      const agoStr = agoSec < 60 ? "just now"
+        : agoSec < 3600 ? `${Math.round(agoSec / 60)}m ago`
+        : agoSec < 86400 ? `${Math.round(agoSec / 3600)}h ago`
+        : `${Math.round(agoSec / 86400)}d ago`;
+      const status = r.ok ? "✓" : "✗";
+      const answer = r.answer ? ` → "${r.answer.substring(0, 120)}"` : "";
+      return `  [${agoStr}] ${status} "${r.goal}"${answer}`;
+    });
+
+    return `<SESSION_CONTEXT>\nRecent tasks this session — you may reference these findings:\n${recent.join("\n")}\n</SESSION_CONTEXT>`;
+  } catch (e) {
+    return null;
+  }
+}
+
 // -- Task lifecycle -----------------------------------------------------------
 
 async function startTask(goal, tabId, autoApprove = false) {
@@ -235,6 +325,7 @@ async function startTask(goal, tabId, autoApprove = false) {
   STATE.goal = goal;
   STATE.running = true;
   STATE.cancelled = false;
+  STATE.inFlightRequests.clear();
   setBadge("ON", "#1f8b4c");
 
   try {
@@ -257,21 +348,27 @@ async function startTask(goal, tabId, autoApprove = false) {
 
   // Get active settings from local storage
   const settings = await chrome.storage.local.get({
-    baseUrl: "http://127.0.0.1:11434/v1",
+    provider:     "ollama",
+    baseUrl:      "http://127.0.0.1:11434/v1",
+    apiKey:       "",
     anthropicKey: "",
-    model: "minicpm-v:8b",
-    temperature: 0.2,
-    maxSteps: 100,
-    uncensored: false
+    model:        "minicpm-v:8b",
+    temperature:  0.2,
+    maxSteps:     100,
+    uncensored:   false,
+    thinking:     false,
   });
 
   // Instantiate LLM client
   const llm = new LocalLLM({
-    baseUrl: settings.baseUrl,
-    model: settings.model,
+    provider:    settings.provider,
+    baseUrl:     settings.baseUrl,
+    model:       settings.model,
     temperature: settings.temperature,
-    anthropicKey: settings.anthropicKey,
-    jsonMode: true
+    apiKey:      settings.apiKey || settings.anthropicKey,
+    jsonMode:    true,
+    uncensored:  settings.uncensored,
+    thinking:    settings.thinking,
   });
 
   // Instantiate Domain Policy
@@ -317,6 +414,25 @@ async function startTask(goal, tabId, autoApprove = false) {
         STATE.activeConfirmResolver = { rid, resolve };
       });
     },
+
+    // Post-action verify + awaiting_approval hook:
+    //   verified=true + autoApprove  → auto-continue silently
+    //   verified=false               → always pause and ask user
+    //   verified=true + !autoApprove → pause for user review before next step
+    verifyConfirm: async (observation, verified, shouldPause) => {
+      // In auto-approve mode, only stop for genuine failures
+      if (autoApprove && verified) return true;
+
+      const rid = Math.random().toString(36).substring(2, 14);
+      const prompt = verified
+        ? `Step result: ${observation}\n\nContinue to the next step?`
+        : `⚠ Verification issue: ${observation}\n\nContinue anyway?`;
+      broadcastStatus({ event: "verify_request", rid, observation, verified, prompt });
+      return new Promise((resolve) => {
+        STATE.activeConfirmResolver = { rid, resolve };
+      });
+    },
+
     userAnswer: async (question) => {
       const rid = Math.random().toString(36).substring(2, 14);
       broadcastStatus({ event: "answer_request", rid, question });
@@ -343,9 +459,14 @@ async function startTask(goal, tabId, autoApprove = false) {
 
   STATE.activeAgent = agent;
 
+  // Load previous task context to give the agent session memory
+  const sessionContext = await loadSessionContext();
+
   try {
-    const result = await agent.run(goal);
+    const result = await agent.run(goal, { sessionContext });
     broadcastStatus({ event: "done", result });
+    // Persist this task so future tasks can reference it
+    await saveTaskRecord(goal, result);
   } catch (err) {
     console.error("Agent execution error:", err);
     broadcastStatus({ event: "error", message: `Agent run error: ${err.message || err}` });
@@ -482,27 +603,46 @@ function _getInteractiveElementsPage() {
     return labelText;
   }
 
-  function add(el) {
+  function add(el, offsetLeft, offsetTop) {
     if (out.length >= 450 || seen.has(el) || Date.now() > deadline) return;
     seen.add(el);
     var r = el.getBoundingClientRect();
     if (r.width < 4 || r.height < 4) return;
-    if (r.right < 0 || r.bottom < 0) return;
-    if (r.left > window.innerWidth || r.top > window.innerHeight) return;
+    if (r.right + (offsetLeft || 0) < 0 || r.bottom + (offsetTop || 0) < 0) return;
+    if (r.left + (offsetLeft || 0) > window.innerWidth || r.top + (offsetTop || 0) > window.innerHeight) return;
     var s = window.getComputedStyle(el);
     if (s.visibility === "hidden" || s.display === "none") return;
     if (parseFloat(s.opacity) < 0.1) return;
-    var cx = Math.round(r.left + r.width / 2);
-    var cy = Math.round(r.top  + r.height / 2);
+    var cx = Math.round(r.left + r.width / 2) + (offsetLeft || 0);
+    var cy = Math.round(r.top  + r.height / 2) + (offsetTop || 0);
     out.push({ id: nextId++, x: cx, y: cy,
                w: Math.round(r.width), h: Math.round(r.height), label: lbl(el) });
   }
 
-  function scan(root) {
+  function scan(root, offsetLeft, offsetTop) {
+    offsetLeft = offsetLeft || 0;
+    offsetTop = offsetTop || 0;
     if (Date.now() > deadline || out.length >= 450) return;
-    TAGS.forEach(function(t)  { try { root.querySelectorAll(t).forEach(add); } catch(_){} });
-    ROLES.forEach(function(r) { try { root.querySelectorAll('[role="'+r+'"]').forEach(add); } catch(_){} });
-    try { root.querySelectorAll('[tabindex="0"],[onclick]').forEach(add); } catch(_){}
+
+    TAGS.forEach(function(t)  {
+      try {
+        root.querySelectorAll(t).forEach(function(el) {
+          add(el, offsetLeft, offsetTop);
+        });
+      } catch(_){}
+    });
+    ROLES.forEach(function(r) {
+      try {
+        root.querySelectorAll('[role="'+r+'"]').forEach(function(el) {
+          add(el, offsetLeft, offsetTop);
+        });
+      } catch(_){}
+    });
+    try {
+      root.querySelectorAll('[tabindex="0"],[onclick]').forEach(function(el) {
+        add(el, offsetLeft, offsetTop);
+      });
+    } catch(_){}
     
     try {
       root.querySelectorAll("*").forEach(function(el) {
@@ -518,7 +658,7 @@ function _getInteractiveElementsPage() {
             }
           }
           if (hasDirectText) {
-            add(el);
+            add(el, offsetLeft, offsetTop);
           }
         }
       });
@@ -526,20 +666,23 @@ function _getInteractiveElementsPage() {
 
     try {
       root.querySelectorAll("*").forEach(function(el) {
-        if (el.shadowRoot) scan(el.shadowRoot);
+        if (el.shadowRoot) scan(el.shadowRoot, offsetLeft, offsetTop);
       });
     } catch(_) {}
     try {
       root.querySelectorAll("iframe").forEach(function(fr) {
         try {
+          var frRect = fr.getBoundingClientRect();
           var doc = fr.contentDocument || fr.contentWindow.document;
-          if (doc && doc.body) scan(doc.body);
+          if (doc && doc.body) {
+            scan(doc.body, offsetLeft + frRect.left, offsetTop + frRect.top);
+          }
         } catch(_) {}
       });
     } catch(_) {}
   }
 
-  scan(document.body || document.documentElement);
+  scan(document.body || document.documentElement, 0, 0);
 
   var PIECE_CODE = { wp:'White Pawn', wr:'White Rook', wn:'White Knight',
     wb:'White Bishop', wq:'White Queen', wk:'White King',
@@ -705,7 +848,7 @@ function _getInteractiveElementsPageAggressive() {
     return labelText;
   }
 
-  function add(el) {
+  function add(el, offsetLeft, offsetTop) {
     if (out.length >= 450 || seen.has(el) || Date.now() > deadline) return;
     seen.add(el);
     var r = el.getBoundingClientRect();
@@ -713,13 +856,15 @@ function _getInteractiveElementsPageAggressive() {
     var s = window.getComputedStyle(el);
     if (s.visibility === "hidden" || s.display === "none") return;
     if (parseFloat(s.opacity) < 0.1) return;
-    var cx = Math.round(r.left + r.width / 2);
-    var cy = Math.round(r.top  + r.height / 2);
+    var cx = Math.round(r.left + r.width / 2) + (offsetLeft || 0);
+    var cy = Math.round(r.top  + r.height / 2) + (offsetTop || 0);
     out.push({ id: nextId++, x: cx, y: cy,
                w: Math.round(r.width), h: Math.round(r.height), label: lbl(el) });
   }
 
-  function scan(root) {
+  function scan(root, offsetLeft, offsetTop) {
+    offsetLeft = offsetLeft || 0;
+    offsetTop = offsetTop || 0;
     if (Date.now() > deadline || out.length >= 450) return;
     TAGS.forEach(function(t)  {
       try {
@@ -730,7 +875,7 @@ function _getInteractiveElementsPageAggressive() {
           if (["a","button","input","select","textarea"].includes(tag) ||
               s.cursor === "pointer" || el.onclick || el.getAttribute("tabindex") !== null ||
               el.isContentEditable) {
-            add(el);
+            add(el, offsetLeft, offsetTop);
           }
         });
       } catch(_){}
@@ -738,20 +883,23 @@ function _getInteractiveElementsPageAggressive() {
     
     try {
       root.querySelectorAll("*").forEach(function(el) {
-        if (el.shadowRoot) scan(el.shadowRoot);
+        if (el.shadowRoot) scan(el.shadowRoot, offsetLeft, offsetTop);
       });
     } catch(_) {}
     try {
       root.querySelectorAll("iframe").forEach(function(fr) {
         try {
+          var frRect = fr.getBoundingClientRect();
           var doc = fr.contentDocument || fr.contentWindow.document;
-          if (doc && doc.body) scan(doc.body);
+          if (doc && doc.body) {
+            scan(doc.body, offsetLeft + frRect.left, offsetTop + frRect.top);
+          }
         } catch(_) {}
       });
     } catch(_) {}
   }
 
-  scan(document.body || document.documentElement);
+  scan(document.body || document.documentElement, 0, 0);
   out = out.slice(0, 300);
   return out;
 }
@@ -859,6 +1007,7 @@ async function takeSnapshot(tabId, forceFresh = false) {
   } catch (_) {}
 
   const canUseCache = !forceFresh &&
+                      !STATE.elementMapDirty &&
                       tab.url === STATE.lastUrl &&
                       tab.title === STATE.lastTitle &&
                       scrollPosStr === STATE.lastScrollPos &&
@@ -947,6 +1096,7 @@ async function takeSnapshot(tabId, forceFresh = false) {
     STATE.lastScrollPos = scrollPosStr;
     STATE.lastScreenshotB64 = screenshotB64;
     STATE.lastElementMapArray = elementMap;
+    STATE.elementMapDirty = false;
   }
 
   const notification = newTabHistoryEntry;
@@ -1073,6 +1223,9 @@ function compactA11y(nodes) {
 
   for (const n of nodes) {
     const role = (n.role && n.role.value) || "";
+    // Skip nodes explicitly hidden from assistive tech
+    const isHidden = (n.properties || []).some(p => p.name === "hidden" && p.value && p.value.value === true);
+    if (isHidden) continue;
     const line = describe(n);
     if (!line) continue;
     if (INTERACTIVE.has(role)) {
@@ -1080,13 +1233,13 @@ function compactA11y(nodes) {
     } else if (SECONDARY.has(role)) {
       secondary.push(line);
     }
-    if (interactive.length >= 120) break;
+    if (interactive.length >= 200) break;
   }
 
   // Always show all interactive elements; pad with secondary up to a budget
   const out = [...interactive];
   for (const s of secondary) {
-    if (out.length >= 180) break;
+    if (out.length >= 260) break;
     out.push(s);
   }
   if (out.length === 0) {
@@ -1129,6 +1282,8 @@ async function executeStep(tabId, step) {
         return await actRead(tabId);
       case "wait":
         return await actWait(tabId, action);
+      case "wait_for":
+        return await actWaitFor(tabId, action);
       case "hover":
         return await actHover(tabId, action);
       case "go_back":
@@ -1149,6 +1304,14 @@ async function executeStep(tabId, step) {
         return await actFileUpload(tabId, action);
       case "switch_tab":
         return await actSwitchTab(tabId, action);
+      case "select":
+        return await actSelect(tabId, action);
+      case "fetch":
+        return await actFetch(tabId, action);
+      case "find_text":
+        return await actFindText(tabId, action);
+      case "close_tab":
+        return await actCloseTab(tabId, action);
       default:
         return { success: false, action_type: action.type, error: "unsupported in extension" };
     }
@@ -1183,36 +1346,99 @@ async function actNewTab(tabId, a) {
   return { success: true, action_type: "new_tab", url: tab.url, title: tab.title };
 }
 
+function guessMimeType(fileName) {
+  const ext = (fileName.split('.').pop() || '').toLowerCase();
+  const map = {
+    pdf: 'application/pdf', png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg',
+    gif: 'image/gif', webp: 'image/webp', svg: 'image/svg+xml', bmp: 'image/bmp',
+    txt: 'text/plain', csv: 'text/csv', html: 'text/html', htm: 'text/html',
+    json: 'application/json', xml: 'application/xml',
+    zip: 'application/zip', gz: 'application/gzip', tar: 'application/x-tar',
+    doc: 'application/msword',
+    docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    xls: 'application/vnd.ms-excel',
+    xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    ppt: 'application/vnd.ms-powerpoint',
+    pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+    mp4: 'video/mp4', mp3: 'audio/mpeg', wav: 'audio/wav', ogg: 'audio/ogg',
+    webm: 'video/webm', avi: 'video/avi', mov: 'video/quicktime',
+  };
+  return map[ext] || 'application/octet-stream';
+}
+
 async function actFileUpload(tabId, a) {
   let backendNodeId;
+  let resolvedPt = null;
+
   if (a.som_id != null) {
     const pt = await resolveSomId(tabId, a.som_id);
-    if (!pt) {
-      return { success: false, action_type: "file_upload", error: `som_id ${a.som_id} not found` };
-    }
+    if (!pt) return { success: false, action_type: "file_upload", error: `som_id ${a.som_id} not found` };
+    resolvedPt = pt;
     try {
       const res = await sendCDP(tabId, "DOM.getNodeForLocation", { x: Math.round(pt.x), y: Math.round(pt.y) });
       backendNodeId = res.backendNodeId;
     } catch (e) {
-      return { success: false, action_type: "file_upload", error: `Failed to get node for location: ${e.message}` };
+      return { success: false, action_type: "file_upload", error: `Failed to get node: ${e.message}` };
     }
   } else if (a.ref) {
     backendNodeId = Number(a.ref);
   } else {
-    return { success: false, action_type: "file_upload", error: "file_upload action requires som_id or ref" };
+    return { success: false, action_type: "file_upload", error: "file_upload requires som_id or ref" };
   }
 
+  // Strategy 1: Native CDP path — works for <input type="file"> elements
   try {
-    await sendCDP(tabId, "DOM.setFileInputFiles", {
-      files: [a.path],
-      backendNodeId: backendNodeId
-    });
+    await sendCDP(tabId, "DOM.setFileInputFiles", { files: [a.path], backendNodeId });
     await waitForDOMStability(tabId, 2000, 300);
     const tab = await chrome.tabs.get(tabId);
-    return { success: true, action_type: "file_upload", url: tab.url, title: tab.title };
+    return { success: true, action_type: "file_upload", method: "file_input", url: tab.url, title: tab.title };
   } catch (e) {
-    return { success: false, action_type: "file_upload", error: `CDP setFileInputFiles failed: ${e.message}` };
+    // Only fall through for "not a file input" type errors; hard-fail for other errors
+    const msg = (e.message || '').toLowerCase();
+    if (!msg.includes('file input') && !msg.includes('not of type') && !msg.includes('node is not')) {
+      return { success: false, action_type: "file_upload", error: `CDP setFileInputFiles failed: ${e.message}` };
+    }
   }
+
+  // Strategy 2: DataTransfer drop-event injection — for div/custom drop zones.
+  // Dispatches dragenter → dragover → drop with a synthetic File whose metadata
+  // (name, type) matches the target path.  Sites that inspect file content server-side
+  // after form submission will still receive the real file because the browser's own
+  // upload machinery is triggered by the drop; what we can't inject here is the actual
+  // bytes (the File blob is empty) — sites that do client-side MD5/preview before upload
+  // may notice.  For the vast majority of drag-and-drop upload widgets this is sufficient.
+  const pt = resolvedPt || { x: 640, y: 400 };
+  const fileName = (a.path || '').replace(/\\/g, '/').split('/').pop() || 'file';
+  const mimeType = guessMimeType(fileName);
+
+  const injectResult = await sendCDP(tabId, "Runtime.evaluate", {
+    expression: `(function(px, py, fName, fMime) {
+      try {
+        var el = document.elementFromPoint(px, py);
+        if (!el) return { ok: false, err: 'no element at coords (' + px + ',' + py + ')' };
+        var dt = new DataTransfer();
+        dt.items.add(new File([''], fName, { type: fMime }));
+        ['dragenter', 'dragover', 'drop'].forEach(function(evtName) {
+          el.dispatchEvent(new DragEvent(evtName, { bubbles: true, cancelable: true, dataTransfer: dt }));
+        });
+        return { ok: true, tag: el.tagName };
+      } catch (err) { return { ok: false, err: err.message }; }
+    })(${Math.round(pt.x)}, ${Math.round(pt.y)}, ${JSON.stringify(fileName)}, ${JSON.stringify(mimeType)})`,
+    returnByValue: true,
+  });
+
+  const val = injectResult?.result?.value;
+  if (val?.ok) {
+    await waitForDOMStability(tabId, 2000, 300);
+    const tab = await chrome.tabs.get(tabId);
+    return { success: true, action_type: "file_upload", method: "datatransfer_inject", url: tab.url, title: tab.title };
+  }
+
+  return {
+    success: false, action_type: "file_upload",
+    error: `Drop zone injection failed: ${val?.err || 'unknown'}. ` +
+           `If this element opens a native OS file dialog, click it first and then handle the dialog separately.`,
+  };
 }
 
 async function actSwitchTab(tabId, a) {
@@ -1234,6 +1460,191 @@ async function actSwitchTab(tabId, a) {
   }
   await waitForDOMStability(targetTab.id, 2000, 300);
   return { success: true, action_type: "switch_tab", url: targetTab.url, title: targetTab.title };
+}
+
+// Select a <select> dropdown option by visible text or value attribute.
+// Works on any <select> element — resolves via som_id, ref, or x,y.
+async function actSelect(tabId, a) {
+  const fpBefore = await domFingerprint(tabId);
+  let objectId;
+
+  if (a.som_id != null) {
+    const pt = await resolveSomId(tabId, a.som_id);
+    if (!pt) return { success: false, action_type: "select", error: `som_id ${a.som_id} not found` };
+    try {
+      const res = await sendCDP(tabId, "DOM.getNodeForLocation", { x: Math.round(pt.x), y: Math.round(pt.y) });
+      const obj = await sendCDP(tabId, "DOM.resolveNode", { backendNodeId: res.backendNodeId });
+      objectId = obj.object.objectId;
+    } catch (e) {
+      return { success: false, action_type: "select", error: `Failed to resolve som_id ${a.som_id}: ${e.message}` };
+    }
+  } else if (a.ref) {
+    try {
+      const obj = await sendCDP(tabId, "DOM.resolveNode", { backendNodeId: Number(a.ref) });
+      objectId = obj.object.objectId;
+    } catch (e) {
+      return { success: false, action_type: "select", error: `Stale ref ${a.ref}: ${e.message}` };
+    }
+  } else {
+    return { success: false, action_type: "select", error: "select requires som_id or ref" };
+  }
+
+  const selectValue = a.value != null ? String(a.value) : null;
+  const selectText  = a.text  != null ? String(a.text)  : null;
+
+  const result = await sendCDP(tabId, "Runtime.callFunctionOn", {
+    objectId,
+    functionDeclaration: `function(val, txt) {
+      if (this.tagName.toLowerCase() !== 'select') {
+        // Try to find the nearest select element
+        var sel = this.closest('select') || this.querySelector('select');
+        if (!sel) return { ok: false, err: 'not a select element: ' + this.tagName };
+        this = sel;
+      }
+      var opts = Array.from(this.options);
+      var opt = null;
+      if (val !== null) opt = opts.find(function(o){ return o.value === val; });
+      if (!opt && txt !== null) opt = opts.find(function(o){ return o.text.trim() === txt; });
+      if (!opt && txt !== null) opt = opts.find(function(o){ return o.text.trim().toLowerCase().includes(txt.toLowerCase()); });
+      if (!opt) return { ok: false, err: 'option not found: value=' + val + ' text=' + txt };
+      this.value = opt.value;
+      this.dispatchEvent(new Event('change', { bubbles: true }));
+      this.dispatchEvent(new Event('input',  { bubbles: true }));
+      return { ok: true, selected: opt.text.trim() };
+    }`,
+    arguments: [
+      { value: selectValue },
+      { value: selectText  },
+    ],
+    returnByValue: true,
+  });
+
+  const val = result?.result?.value;
+  if (!val?.ok) {
+    return { success: false, action_type: "select", error: val?.err || "unknown error in select" };
+  }
+
+  await waitForDOMStability(tabId, 1500, 200);
+  const tab    = await chrome.tabs.get(tabId);
+  const fpAfter = await domFingerprint(tabId);
+  const diff    = diffFingerprints(fpBefore, fpAfter);
+  return { success: true, action_type: "select", selected: val.selected, url: tab.url, title: tab.title, page_changed: (tab.url !== (await chrome.tabs.get(tabId)).url) || diff.anyChange, dom_diff: diff.summary };
+}
+
+// Make an HTTP request from the page context (inherits cookies/session).
+// Useful for calling page APIs, submitting JSON, reading REST endpoints, etc.
+async function actFetch(tabId, a) {
+  const method  = (a.method || "GET").toUpperCase();
+  const url     = a.url;
+  const headers = a.headers || {};
+  const body    = a.body    != null ? (typeof a.body === "string" ? a.body : JSON.stringify(a.body)) : null;
+
+  if (!url) return { success: false, action_type: "fetch", error: "fetch requires a url" };
+
+  const { result } = await sendCDP(tabId, "Runtime.evaluate", {
+    expression: `(async function() {
+      try {
+        var opts = { method: ${JSON.stringify(method)}, headers: ${JSON.stringify(headers)} };
+        ${body ? `opts.body = ${JSON.stringify(body)};` : ""}
+        var resp = await fetch(${JSON.stringify(url)}, opts);
+        var text = await resp.text();
+        var json = null;
+        try { json = JSON.parse(text); } catch(_) {}
+        return { ok: resp.ok, status: resp.status, body: text.slice(0, 8000), json: json };
+      } catch(err) { return { ok: false, status: 0, body: "", error: err.message }; }
+    })()`,
+    returnByValue: true,
+    awaitPromise: true,
+  });
+
+  const val = result?.value;
+  if (!val) return { success: false, action_type: "fetch", error: "fetch evaluation failed" };
+  if (val.error) return { success: false, action_type: "fetch", error: val.error };
+
+  return {
+    success: true, action_type: "fetch",
+    status: val.status, ok: val.ok,
+    body: val.body,
+    json: val.json,
+  };
+}
+
+// Find an element on the page by its visible text content.
+// Returns the som_id of the matching element so subsequent actions can use it.
+async function actFindText(tabId, a) {
+  if (!a.text) return { success: false, action_type: "find_text", error: "find_text requires a text field" };
+  const exact = a.exact !== false;
+
+  const { result } = await sendCDP(tabId, "Runtime.evaluate", {
+    expression: `(function(needle, exact) {
+      var all = document.querySelectorAll('a,button,[role="button"],[role="link"],label,li,[role="option"],h1,h2,h3,h4,td,th,span,p,div');
+      needle = exact ? needle : needle.toLowerCase();
+      for (var i = 0; i < all.length; i++) {
+        var el = all[i];
+        if (el.offsetParent === null) continue;
+        var t = (el.innerText || el.textContent || '').trim();
+        if (!t) continue;
+        var match = exact ? (t === needle || t.includes(needle)) : t.toLowerCase().includes(needle);
+        if (match) {
+          var r = el.getBoundingClientRect();
+          if (r.width > 0 && r.height > 0) {
+            return { found: true, x: Math.round(r.left + r.width/2), y: Math.round(r.top + r.height/2), text: t.slice(0,80), tag: el.tagName.toLowerCase() };
+          }
+        }
+      }
+      return { found: false };
+    })(${JSON.stringify(a.text)}, ${JSON.stringify(exact)})`,
+    returnByValue: true,
+  });
+
+  const val = result?.value;
+  if (!val?.found) {
+    return { success: false, action_type: "find_text", error: `Text "${a.text}" not found on page` };
+  }
+
+  // Find the matching som_id from the element map if available
+  let somId = null;
+  if (STATE.lastElementMap) {
+    const THRESH = 20;
+    for (const [id, el] of STATE.lastElementMap.entries()) {
+      if (Math.abs(el.x - val.x) < THRESH && Math.abs(el.y - val.y) < THRESH) {
+        somId = id; break;
+      }
+    }
+  }
+
+  return { success: true, action_type: "find_text", x: val.x, y: val.y, text: val.text, tag: val.tag, som_id: somId };
+}
+
+// Close the current tab (or a specific tab by index).
+async function actCloseTab(tabId, a) {
+  const tabs = await chrome.tabs.query({ windowId: chrome.windows.WINDOW_ID_CURRENT });
+  let targetId = tabId;
+
+  if (a && a.tab_index != null) {
+    if (a.tab_index < 0 || a.tab_index >= tabs.length) {
+      return { success: false, action_type: "close_tab", error: `Tab index ${a.tab_index} out of range` };
+    }
+    targetId = tabs[a.tab_index].id;
+  }
+
+  // If closing the active tab, detach the debugger first
+  if (targetId === tabId) {
+    await detachDebugger().catch(() => {});
+  }
+
+  await chrome.tabs.remove(targetId);
+
+  // If we closed our own tab and other tabs exist, re-attach to the new active tab
+  if (targetId === tabId && tabs.length > 1) {
+    const [newActive] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (newActive) {
+      await attachDebugger(newActive.id);
+      STATE.attachedTabId = newActive.id;
+    }
+  }
+
+  return { success: true, action_type: "close_tab", closed_tab_id: targetId };
 }
 
 // -- Pre-click crosshair (position verification) ------------------------------
@@ -1346,7 +1757,7 @@ async function showAgentCursor(tabId, x, y) {
 async function actClick(tabId, a) {
   const tabBefore = await chrome.tabs.get(tabId);
   const urlBefore = tabBefore.url;
-  const htmlLenBefore = await getDOMLength(tabId);
+  const fpBefore = await domFingerprint(tabId);
   let x, y;
 
   // --- Priority 1: som_id — exact centre from the cached element map.
@@ -1409,14 +1820,17 @@ async function actClick(tabId, a) {
   await synthClick(tabId, x, y);
   await waitForDOMStability(tabId, 3500, 350);
   const tab = await chrome.tabs.get(tabId);
-  const htmlLenAfter = await getDOMLength(tabId);
-  const pageChanged = (tab.url !== urlBefore) || (htmlLenBefore !== htmlLenAfter);
+  const fpAfter = await domFingerprint(tabId);
+  const diff = diffFingerprints(fpBefore, fpAfter);
+  const urlChanged = tab.url !== urlBefore;
+  const pageChanged = urlChanged || diff.anyChange;
+  if (diff.anyChange || urlChanged) STATE.elementMapDirty = true;
 
   // If the click did not navigate anywhere, check for a newly-opened overlay
   // (dropdown, modal, popover). If one is visible, dismiss it with Escape so it
   // doesn't block the next action. This is a silent recovery — the caller still
   // sees page_changed=false and can decide what to do next.
-  if (!pageChanged) {
+  if (!urlChanged) {
     try {
       const overlayExpr = `(function(){
         var sel = '[role="dialog"],[role="menu"],[role="listbox"],[role="tooltip"],' +
@@ -1453,7 +1867,7 @@ async function actClick(tabId, a) {
     } catch (_) {}
   }
 
-  return { success: true, action_type: "click", url: tab.url, title: tab.title, page_changed: pageChanged };
+  return { success: true, action_type: "click", url: tab.url, title: tab.title, page_changed: pageChanged, dom_diff: diff.summary };
 }
 
 // When a ref is stale (page re-rendered between snapshot and execution),
@@ -1481,7 +1895,7 @@ async function focusInputFallback(tabId) {
 async function actType(tabId, a) {
   const tabBefore = await chrome.tabs.get(tabId);
   const urlBefore = tabBefore.url;
-  const htmlLenBefore = await getDOMLength(tabId);
+  const fpBefore = await domFingerprint(tabId);
   let cursorX = null, cursorY = null;
   if (a.ref) {
     let object;
@@ -1518,6 +1932,22 @@ async function actType(tabId, a) {
       await sendCDP(tabId, "Input.dispatchKeyEvent", { type: "char", text: ch });
     }
   }
+  // Fire React/Vue/Angular controlled-input events: use the native HTMLInputElement.prototype
+  // value setter (bypasses React's patched setter), then dispatch synthetic input+change events.
+  // Without this, controlled components see insertText as a no-op because React never gets notified.
+  try {
+    await sendCDP(tabId, "Runtime.evaluate", {
+      expression: `(function() {
+        var el = document.activeElement;
+        if (!el || (el.tagName !== 'INPUT' && el.tagName !== 'TEXTAREA' && !el.isContentEditable)) return;
+        var proto = el.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+        var nativeSetter = Object.getOwnPropertyDescriptor(proto, 'value');
+        if (nativeSetter && nativeSetter.set) nativeSetter.set.call(el, el.value);
+        el.dispatchEvent(new Event('input',  { bubbles: true, cancelable: true }));
+        el.dispatchEvent(new Event('change', { bubbles: true, cancelable: true }));
+      })()`,
+    });
+  } catch (_) {}
   if (a.submit) {
     await sendCDP(tabId, "Input.dispatchKeyEvent", { type: "rawKeyDown", windowsVirtualKeyCode: 13, key: "Enter" });
     await sendCDP(tabId, "Input.dispatchKeyEvent", { type: "keyUp", windowsVirtualKeyCode: 13, key: "Enter" });
@@ -1565,44 +1995,111 @@ async function actType(tabId, a) {
     }
   } catch (_) {}
 
-  const htmlLenAfter = await getDOMLength(tabId);
+  const fpAfter = await domFingerprint(tabId);
+  const diff = diffFingerprints(fpBefore, fpAfter);
+  if (diff.anyChange || tab.url !== urlBefore) STATE.elementMapDirty = true;
   return {
     success: true, action_type: "type", url: tab.url, title: tab.title,
-    page_changed: (tab.url !== urlBefore) || (htmlLenBefore !== htmlLenAfter), suggestions_visible: suggestionsVisible,
-    actual_value: actualValue, value_mismatch: valueMismatch
+    page_changed: (tab.url !== urlBefore) || diff.anyChange, suggestions_visible: suggestionsVisible,
+    actual_value: actualValue, value_mismatch: valueMismatch, dom_diff: diff.summary
   };
 }
 
+// Helper: read current scroll state of the document
+async function getScrollInfo(tabId) {
+  try {
+    const { result } = await sendCDP(tabId, "Runtime.evaluate", {
+      expression: `({
+        scrollY:    Math.round(window.scrollY),
+        scrollX:    Math.round(window.scrollX),
+        pageH:      Math.round(document.documentElement.scrollHeight),
+        pageW:      Math.round(document.documentElement.scrollWidth),
+        viewH:      Math.round(window.innerHeight),
+        viewW:      Math.round(window.innerWidth),
+      })`,
+      returnByValue: true,
+    });
+    const v = result?.value;
+    if (!v) return {};
+    const pctY     = v.pageH > 0 ? Math.round((v.scrollY / v.pageH) * 100) : 0;
+    const belowFold = Math.max(0, v.pageH - v.scrollY - v.viewH);
+    return {
+      scroll_y: v.scrollY, scroll_x: v.scrollX,
+      page_height: v.pageH, viewport_height: v.viewH,
+      scrolled_pct: pctY,
+      px_below_fold: belowFold,
+    };
+  } catch (_) { return {}; }
+}
+
 async function actScroll(tabId, a) {
+  const dir = (a.direction || "down").toLowerCase();
+
+  // ── Mode 1: scroll a specific element into view by som_id ─────────────────
   if (a.som_id != null) {
     const pt = await resolveSomId(tabId, a.som_id);
-    if (pt) {
-      const expr = `(function(x,y){
+    if (!pt) return { success: false, action_type: "scroll", error: `som_id ${a.som_id} not found` };
+    await sendCDP(tabId, "Runtime.evaluate", {
+      expression: `(function(x,y){
         var el = document.elementFromPoint(x, y);
-        if (el) {
-          el.scrollIntoView({block: "center", inline: "center"});
-          return true;
-        }
+        if (el) { el.scrollIntoView({ behavior: "smooth", block: "center", inline: "nearest" }); return true; }
         return false;
-      })(${pt.x}, ${pt.y})`;
-      await sendCDP(tabId, "Runtime.evaluate", { expression: expr });
-      await waitForDOMStability(tabId, 1500, 250);
-      const tab = await chrome.tabs.get(tabId);
-      return { success: true, action_type: "scroll", url: tab.url };
-    } else {
-      return { success: false, action_type: "scroll", error: `som_id ${a.som_id} not found to scroll` };
-    }
+      })(${Math.round(pt.x)}, ${Math.round(pt.y)})`,
+    });
+    await waitForDOMStability(tabId, 1500, 250);
+    const scrollInfo = await getScrollInfo(tabId);
+    const tab = await chrome.tabs.get(tabId);
+    return { success: true, action_type: "scroll", url: tab.url, ...scrollInfo };
   }
-  const dx = a.direction === "left" ? -a.amount : a.direction === "right" ? a.amount : 0;
-  const dy = a.direction === "up" ? -a.amount : a.direction === "down" ? a.amount : 0;
+
+  // ── Mode 2: directional scroll of document or a named container ───────────
+  // amount: number of pixels, or undefined = one full viewport height
+  const isHoriz = dir === "left" || dir === "right";
+  const sign    = (dir === "down" || dir === "right") ? 1 : -1;
+
+  // If selector is given, scroll that container; otherwise scroll the document
+  const containerSel = a.selector ? JSON.stringify(a.selector) : null;
+  const amountExpr   = typeof a.amount === "number"
+    ? String(a.amount)
+    : (isHoriz ? "window.innerWidth" : "window.innerHeight");
+
+  const scrollJsExpr = containerSel
+    ? `(function(){
+        var el = document.querySelector(${containerSel});
+        if (!el) { return "not_found"; }
+        el.scrollBy({ ${isHoriz ? "left" : "top"}: ${sign} * ${amountExpr}, behavior: "smooth" });
+        return "ok";
+      })()`
+    : `(function(){
+        window.scrollBy({ ${isHoriz ? "left" : "top"}: ${sign} * ${amountExpr}, behavior: "smooth" });
+        return "ok";
+      })()`;
+
   const cx = a.x ?? 640, cy = a.y ?? 400;
   await showAgentCursor(tabId, cx, cy);
-  await sendCDP(tabId, "Input.dispatchMouseEvent", {
-    type: "mouseWheel", x: cx, y: cy, deltaX: dx, deltaY: dy,
+
+  // Primary: JS scrollBy (works on virtually all pages including SPAs)
+  const { result: jsRes } = await sendCDP(tabId, "Runtime.evaluate", {
+    expression: scrollJsExpr, returnByValue: true,
   });
+  if (jsRes?.value === "not_found") {
+    return { success: false, action_type: "scroll", error: `selector "${a.selector}" not found on page` };
+  }
+
+  // Secondary: also fire mouseWheel event (for sites that listen to wheel events on custom containers)
+  const pxHint  = typeof a.amount === "number" ? a.amount : 400;
+  const wdx = isHoriz ? sign * pxHint : 0;
+  const wdy = isHoriz ? 0 : sign * pxHint;
+  try {
+    await sendCDP(tabId, "Input.dispatchMouseEvent", {
+      type: "mouseWheel", x: cx, y: cy, deltaX: wdx, deltaY: wdy,
+    });
+  } catch (_) {}
+
   await waitForDOMStability(tabId, 1500, 250);
+  const scrollInfo = await getScrollInfo(tabId);
   const tab = await chrome.tabs.get(tabId);
-  return { success: true, action_type: "scroll", url: tab.url };
+  return { success: true, action_type: "scroll", url: tab.url, ...scrollInfo };
 }
 
 async function actNavigate(tabId, a) {
@@ -1610,15 +2107,31 @@ async function actNavigate(tabId, a) {
   await chrome.tabs.update(tabId, { url: a.url });
   await waitForLoad(tabId);
   // Cross-process navigations (new origin) silently detach the debugger.
-  // Re-attach so subsequent snapshots and actions keep working.
-  try {
-    await sendCDP(tabId, "Accessibility.enable", {});
-  } catch (_) {
-    try { await detachDebugger(); } catch (_2) {}
-    await attachDebugger(tabId);
-    STATE.attachedTabId = tabId;
+  // Retry re-attach up to 3 times with backoff before giving up.
+  let attached = false;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      await sendCDP(tabId, "Accessibility.enable", {});
+      attached = true;
+      break;
+    } catch (_) {
+      try { await detachDebugger(); } catch (_2) {}
+      try {
+        await attachDebugger(tabId);
+        STATE.attachedTabId = tabId;
+        attached = true;
+        break;
+      } catch (e) {
+        console.warn(`[agent] debugger re-attach attempt ${attempt + 1} failed:`, e);
+        if (attempt < 2) await sleep(400 * (attempt + 1));
+      }
+    }
   }
-  await waitForNetworkIdle(tabId, 4000, 400); // wait for XHR/fetch after page load
+  if (!attached) {
+    return { success: false, action_type: "navigate", error: "debugger detached after cross-origin navigation and could not re-attach. Try navigate again or use new_tab." };
+  }
+  STATE.elementMapDirty = true;
+  await waitForNetworkIdle(tabId, 4000, 400);
   await waitForDOMStability(tabId, 2000, 300);
   await startTabBlink(tabId);
   const tab = await chrome.tabs.get(tabId);
@@ -1628,7 +2141,7 @@ async function actNavigate(tabId, a) {
 async function actKey(tabId, a) {
   const tabBefore = await chrome.tabs.get(tabId);
   const urlBefore = tabBefore.url;
-  const htmlLenBefore = await getDOMLength(tabId);
+  const fpBefore = await domFingerprint(tabId);
   await showAgentCursor(tabId, 640, 400);
   const map = {
     Enter: 13, Tab: 9, Escape: 27, Backspace: 8,
@@ -1645,8 +2158,10 @@ async function actKey(tabId, a) {
     await waitForDOMStability(tabId, 1000, 200);
   }
   const tab = await chrome.tabs.get(tabId);
-  const htmlLenAfter = await getDOMLength(tabId);
-  return { success: true, action_type: "key", url: tab.url, title: tab.title, page_changed: (tab.url !== urlBefore) || (htmlLenBefore !== htmlLenAfter) };
+  const fpAfter = await domFingerprint(tabId);
+  const diff = diffFingerprints(fpBefore, fpAfter);
+  if (diff.anyChange || tab.url !== urlBefore) STATE.elementMapDirty = true;
+  return { success: true, action_type: "key", url: tab.url, title: tab.title, page_changed: (tab.url !== urlBefore) || diff.anyChange, dom_diff: diff.summary };
 }
 
 async function actRead(tabId) {
@@ -1658,6 +2173,56 @@ async function actRead(tabId) {
     title: state.title,
     page_snapshot: state.accessibility_tree,
     extracted: state.visible_text,
+  };
+}
+
+// Wait until a CSS selector becomes visible OR specific text appears on the page.
+// Polls every 500ms up to `timeout` seconds. Replaces fragile wait+read loops.
+async function actWaitFor(tabId, a) {
+  const maxMs = Math.min(((a.timeout || 15) * 1000), 60000);
+  const selector = a.selector || null;
+  const text     = a.text     || null;
+
+  if (!selector && !text) {
+    return { success: false, action_type: "wait_for", error: "wait_for requires 'selector' or 'text'" };
+  }
+
+  const deadline = Date.now() + maxMs;
+  while (Date.now() < deadline) {
+    try {
+      const { result } = await sendCDP(tabId, "Runtime.evaluate", {
+        expression: `(function(sel, txt) {
+          if (sel) {
+            var el = document.querySelector(sel);
+            if (el) {
+              var r = el.getBoundingClientRect();
+              var s = window.getComputedStyle(el);
+              if (r.width > 0 && r.height > 0 && s.display !== 'none' && s.visibility !== 'hidden') {
+                return { found: true, by: 'selector' };
+              }
+            }
+          }
+          if (txt) {
+            var body = document.body ? (document.body.innerText || '') : '';
+            if (body.includes(txt)) return { found: true, by: 'text' };
+          }
+          return { found: false };
+        })(${JSON.stringify(selector)}, ${JSON.stringify(text)})`,
+        returnByValue: true,
+      });
+      const val = result?.value;
+      if (val?.found) {
+        const tab = await chrome.tabs.get(tabId);
+        return { success: true, action_type: "wait_for", found_by: val.by, url: tab.url, title: tab.title };
+      }
+    } catch (_) {}
+    await sleep(500);
+  }
+
+  const tab = await chrome.tabs.get(tabId).catch(() => ({ url: null, title: null }));
+  return {
+    success: false, action_type: "wait_for",
+    error: `Timeout after ${a.timeout || 15}s — '${selector || text}' did not appear. Current page: ${tab.url || "unknown"}`,
   };
 }
 
@@ -1685,6 +2250,7 @@ function attachDebugger(tabId) {
         sendCDP(tabId, "DOM.enable", {}),
         sendCDP(tabId, "Accessibility.enable", {}),
         sendCDP(tabId, "Page.enable", {}),
+        sendCDP(tabId, "Network.enable", {}),
       ]).then(() => resolve()).catch(reject);
     });
   });
@@ -1711,14 +2277,34 @@ function sendCDP(tabId, method, params) {
 }
 
 async function synthClick(tabId, x, y) {
+  const ptr = async (type, buttons) => {
+    try {
+      await sendCDP(tabId, "Runtime.evaluate", {
+        expression: `(function(t,x,y,btn){
+          var el = document.elementFromPoint(x,y);
+          if (!el) return;
+          el.dispatchEvent(new PointerEvent(t, {
+            bubbles:true, cancelable:true,
+            clientX:x, clientY:y, screenX:x, screenY:y,
+            button: btn > 0 ? 0 : -1, buttons: btn,
+            pointerId:1, pointerType:'mouse', isPrimary:true
+          }));
+        })(${JSON.stringify(type)},${Math.round(x)},${Math.round(y)},${buttons})`,
+      });
+    } catch (_) {}
+  };
   // Move to coordinates first to trigger mouseover/mouseenter/pointerover
   await sendCDP(tabId, "Input.dispatchMouseEvent", {
     type: "mouseMoved", x, y, button: "none", buttons: 0,
   });
+  await ptr("pointerover", 0);
   await sleep(50);
+  await ptr("pointerdown", 1);
   await sendCDP(tabId, "Input.dispatchMouseEvent", {
     type: "mousePressed", x, y, button: "left", buttons: 1, clickCount: 1,
   });
+  await sleep(30);
+  await ptr("pointerup", 0);
   await sendCDP(tabId, "Input.dispatchMouseEvent", {
     type: "mouseReleased", x, y, button: "left", buttons: 0, clickCount: 1,
   });
@@ -1748,48 +2334,62 @@ async function synthDoubleClick(tabId, x, y) {
 }
 
 async function synthDrag(tabId, sx, sy, dx, dy) {
-  // 1. Move to source to trigger mouseover/mouseenter/pointerover
-  await sendCDP(tabId, "Input.dispatchMouseEvent", {
-    type: "mouseMoved", x: sx, y: sy, button: "none", buttons: 0,
-  });
+  // Helper: dispatch a PointerEvent via JS injection on the element at (x,y).
+  // Needed for frameworks (chessground, React-DnD, SortableJS, etc.) that listen
+  // only to pointer events, not the raw mouse events CDP fires.
+  const ptr = async (type, x, y, buttons) => {
+    try {
+      await sendCDP(tabId, "Runtime.evaluate", {
+        expression: `(function(t,x,y,btn){
+          var el = document.elementFromPoint(x,y);
+          if (!el) return;
+          el.dispatchEvent(new PointerEvent(t, {
+            bubbles:true, cancelable:true,
+            clientX:x, clientY:y, screenX:x, screenY:y,
+            button: btn > 0 ? 0 : -1, buttons: btn,
+            pointerId:1, pointerType:'mouse', isPrimary:true
+          }));
+        })(${JSON.stringify(type)},${Math.round(x)},${Math.round(y)},${buttons})`,
+      });
+    } catch (_) {}
+  };
+
+  // 1. Move to source and fire pointerover so the element enters hover state
+  await sendCDP(tabId, "Input.dispatchMouseEvent", { type: "mouseMoved", x: sx, y: sy, button: "none", buttons: 0 });
+  await ptr("pointerover", sx, sy, 0);
+  await sleep(60);
+
+  // 2. pointerdown + mousedown at source
+  await ptr("pointerdown", sx, sy, 1);
+  await sendCDP(tabId, "Input.dispatchMouseEvent", { type: "mousePressed", x: sx, y: sy, button: "left", buttons: 1, clickCount: 1 });
   await sleep(100);
 
-  // 2. mousedown at source
-  await sendCDP(tabId, "Input.dispatchMouseEvent", {
-    type: "mousePressed", x: sx, y: sy, button: "left", buttons: 1, clickCount: 1,
-  });
-  await sleep(100);
-
-  // 3. Move slightly in the direction of the drag to trigger drag initiation (>3px threshold)
+  // 3. Small jitter to cross the drag-start threshold (usually ~3px)
   const ox = dx !== sx ? (dx > sx ? 4 : -4) : 0;
   const oy = dy !== sy ? (dy > sy ? 4 : -4) : 4;
-  await sendCDP(tabId, "Input.dispatchMouseEvent", {
-    type: "mouseMoved", x: sx + ox, y: sy + oy, button: "left", buttons: 1,
-  });
+  await ptr("pointermove", sx + ox, sy + oy, 1);
+  await sendCDP(tabId, "Input.dispatchMouseEvent", { type: "mouseMoved", x: sx + ox, y: sy + oy, button: "left", buttons: 1 });
   await sleep(50);
 
-  // 4. Interpolate ~15 mousemove events so drag-sensitive apps see a smooth path
+  // 4. Interpolate ~15 move events for smooth drag path
   const steps = 15;
   for (let i = 1; i <= steps; i++) {
     const ix = Math.round(sx + (dx - sx) * i / steps);
     const iy = Math.round(sy + (dy - sy) * i / steps);
-    await sendCDP(tabId, "Input.dispatchMouseEvent", {
-      type: "mouseMoved", x: ix, y: iy, button: "left", buttons: 1,
-    });
-    await sleep(20); // ~50 fps
+    await ptr("pointermove", ix, iy, 1);
+    await sendCDP(tabId, "Input.dispatchMouseEvent", { type: "mouseMoved", x: ix, y: iy, button: "left", buttons: 1 });
+    await sleep(20);
   }
+  await sleep(80);
+
+  // 5. Final hover at destination
+  await ptr("pointermove", dx, dy, 1);
+  await sendCDP(tabId, "Input.dispatchMouseEvent", { type: "mouseMoved", x: dx, y: dy, button: "left", buttons: 1 });
   await sleep(100);
 
-  // 5. Ensure pointer hover state is updated at destination
-  await sendCDP(tabId, "Input.dispatchMouseEvent", {
-    type: "mouseMoved", x: dx, y: dy, button: "left", buttons: 1,
-  });
-  await sleep(100);
-
-  // 6. mouseup at destination
-  await sendCDP(tabId, "Input.dispatchMouseEvent", {
-    type: "mouseReleased", x: dx, y: dy, button: "left", buttons: 0, clickCount: 1,
-  });
+  // 6. pointerup + mouseup at destination
+  await ptr("pointerup", dx, dy, 0);
+  await sendCDP(tabId, "Input.dispatchMouseEvent", { type: "mouseReleased", x: dx, y: dy, button: "left", buttons: 0, clickCount: 1 });
 }
 
 // -- Resolve som_id → exact (x, y) from the cached element map ----------------
@@ -1832,7 +2432,7 @@ async function resolveCoords(tabId, ref, x, y, actionType) {
 async function actDoubleClick(tabId, a) {
   const tabBefore = await chrome.tabs.get(tabId);
   const urlBefore = tabBefore.url;
-  const htmlLenBefore = await getDOMLength(tabId);
+  const fpBefore = await domFingerprint(tabId);
   const somPt = await resolveSomId(tabId, a.som_id);
   const coords = somPt ? somPt : await resolveCoords(tabId, a.ref, a.x, a.y, "double_click");
   if (coords.error) return { success: false, ...coords };
@@ -1840,14 +2440,16 @@ async function actDoubleClick(tabId, a) {
   await synthDoubleClick(tabId, coords.x, coords.y);
   await waitForDOMStability(tabId, 3000, 350);
   const tab = await chrome.tabs.get(tabId);
-  const htmlLenAfter = await getDOMLength(tabId);
-  return { success: true, action_type: "double_click", url: tab.url, title: tab.title, page_changed: (tab.url !== urlBefore) || (htmlLenBefore !== htmlLenAfter) };
+  const fpAfter = await domFingerprint(tabId);
+  const diff = diffFingerprints(fpBefore, fpAfter);
+  if (diff.anyChange || tab.url !== urlBefore) STATE.elementMapDirty = true;
+  return { success: true, action_type: "double_click", url: tab.url, title: tab.title, page_changed: (tab.url !== urlBefore) || diff.anyChange, dom_diff: diff.summary };
 }
 
 async function actRightClick(tabId, a) {
   const tabBefore = await chrome.tabs.get(tabId);
   const urlBefore = tabBefore.url;
-  const htmlLenBefore = await getDOMLength(tabId);
+  const fpBefore = await domFingerprint(tabId);
   const somPt = await resolveSomId(tabId, a.som_id);
   const coords = somPt ? somPt : await resolveCoords(tabId, a.ref, a.x, a.y, "right_click");
   if (coords.error) return { success: false, ...coords };
@@ -1860,14 +2462,16 @@ async function actRightClick(tabId, a) {
   });
   await waitForDOMStability(tabId, 2000, 300);
   const tab = await chrome.tabs.get(tabId);
-  const htmlLenAfter = await getDOMLength(tabId);
-  return { success: true, action_type: "right_click", url: tab.url, title: tab.title, page_changed: (tab.url !== urlBefore) || (htmlLenBefore !== htmlLenAfter) };
+  const fpAfter = await domFingerprint(tabId);
+  const diff = diffFingerprints(fpBefore, fpAfter);
+  if (diff.anyChange || tab.url !== urlBefore) STATE.elementMapDirty = true;
+  return { success: true, action_type: "right_click", url: tab.url, title: tab.title, page_changed: (tab.url !== urlBefore) || diff.anyChange, dom_diff: diff.summary };
 }
 
 async function actDrag(tabId, a) {
   const tabBefore = await chrome.tabs.get(tabId);
   const urlBefore = tabBefore.url;
-  const htmlLenBefore = await getDOMLength(tabId);
+  const fpBefore = await domFingerprint(tabId);
   // Resolve source: prefer from_som_id (precise center of labeled element)
   let src;
   if (a.from_som_id != null) {
@@ -1893,8 +2497,28 @@ async function actDrag(tabId, a) {
   // 600ms settle — gives CSS transition animations (kanban cards, game pieces, etc.) time to finish
   await waitForDOMStability(tabId, 3000, 600);
   const tab = await chrome.tabs.get(tabId);
-  const htmlLenAfter = await getDOMLength(tabId);
-  return { success: true, action_type: "drag", url: tab.url, title: tab.title, page_changed: (tab.url !== urlBefore) || (htmlLenBefore !== htmlLenAfter) };
+  const fpAfter = await domFingerprint(tabId);
+  const diff = diffFingerprints(fpBefore, fpAfter);
+
+  // Drag produced no change — try click-to-move fallback.
+  // Many UIs (chess boards, kanban columns, sortable lists) support both drag AND
+  // click-select-then-click-destination as equivalent gestures. Try that path now.
+  if (!diff.anyChange && tab.url === urlBefore) {
+    await showAgentCursor(tabId, src.x, src.y);
+    await synthClick(tabId, src.x, src.y);
+    await waitForDOMStability(tabId, 1500, 200);
+    await showAgentCursor(tabId, dst.x, dst.y);
+    await synthClick(tabId, dst.x, dst.y);
+    await waitForDOMStability(tabId, 3000, 600);
+    const tab2 = await chrome.tabs.get(tabId);
+    const fpAfter2 = await domFingerprint(tabId);
+    const diff2 = diffFingerprints(fpBefore, fpAfter2);
+    if (diff2.anyChange || tab2.url !== urlBefore) STATE.elementMapDirty = true;
+    return { success: true, action_type: "drag", url: tab2.url, title: tab2.title, page_changed: (tab2.url !== urlBefore) || diff2.anyChange, dom_diff: diff2.summary, method: "click_to_move" };
+  }
+
+  if (diff.anyChange || tab.url !== urlBefore) STATE.elementMapDirty = true;
+  return { success: true, action_type: "drag", url: tab.url, title: tab.title, page_changed: (tab.url !== urlBefore) || diff.anyChange, dom_diff: diff.summary };
 }
 
 function waitForLoad(tabId, timeout = 15000) {
@@ -1924,6 +2548,177 @@ async function getDOMLength(tabId) {
   } catch (_) {
     return 0;
   }
+}
+
+// -- DOM Fingerprint (before/after action diffing) ----------------------------
+// Captures a lightweight snapshot of observable page state: dialogs, alerts,
+// form errors, expanded widgets, input values, and content volume.
+// Used to detect changes that don't alter the URL or raw HTML length
+// (checkbox toggles, modals, inline validation errors, accordion open/close).
+
+async function domFingerprint(tabId) {
+  try {
+    const { result } = await sendCDP(tabId, "Runtime.evaluate", {
+      expression: `(function() {
+        try {
+          var dialogs  = [...document.querySelectorAll('[role="dialog"],[role="alertdialog"]')]
+                          .filter(function(e){ var r=e.getBoundingClientRect(); return r.width>0&&r.height>0; });
+          var alerts   = [...document.querySelectorAll('[role="alert"],[aria-live]:not([aria-live="off"])')];
+          var expd     = document.querySelectorAll('[aria-expanded="true"]').length;
+          var errors   = [...document.querySelectorAll(
+            '[aria-invalid="true"],[class*="error"i]:not(script):not(style):not(link),' +
+            '[class*="invalid"i]:not(script):not(style),[class*="field-error"i]'
+          )].filter(function(e){ return e.offsetParent!==null; }).slice(0,6);
+          var inputVals = [...document.querySelectorAll(
+            'input:not([type="hidden"]):not([type="password"]),select,textarea'
+          )].filter(function(e){ return e.offsetParent!==null; })
+            .slice(0,12)
+            .map(function(e){
+              return (e.name||e.id||e.placeholder||'?').slice(0,20)+'='+String(e.value||'').slice(0,40);
+            });
+          var checks = [...document.querySelectorAll('input[type="checkbox"],input[type="radio"]')]
+            .filter(function(e){ return e.offsetParent!==null; })
+            .slice(0,10)
+            .map(function(e){ return (e.name||e.id||'?')+':'+(e.checked?'1':'0'); });
+          // Sample CSS transform/position of first 20 visible positioned elements.
+          // Detects moves that change only style (chess pieces, kanban cards, sliders, etc.)
+          // without altering DOM structure or text content.
+          var posStyles = [...document.querySelectorAll('[style]')]
+            .filter(function(e){ return e.offsetParent!==null; })
+            .slice(0,20)
+            .map(function(e){
+              var s = e.style;
+              return (s.transform||'')+'|'+(s.left||'')+'|'+(s.top||'');
+            });
+          return {
+            url:          location.href,
+            dialogCount:  dialogs.length,
+            dialogTexts:  dialogs.slice(0,3).map(function(d){ return d.innerText.slice(0,100).replace(/\\s+/g,' '); }),
+            alertCount:   alerts.length,
+            alertTexts:   alerts.slice(0,3).map(function(a){ return a.innerText.slice(0,100).replace(/\\s+/g,' '); }),
+            expandedCount: expd,
+            errorCount:   errors.length,
+            errorTexts:   errors.map(function(e){ return e.innerText.slice(0,80).replace(/\\s+/g,' '); }),
+            inputVals:    inputVals,
+            checks:       checks,
+            posStyles:    posStyles,
+            bodyLen:      document.body ? document.body.innerText.length : 0,
+            elemCount:    document.querySelectorAll('*').length,
+          };
+        } catch(err) {
+          return { url: location.href, bodyLen: 0, elemCount: 0, dialogCount:0, alertCount:0, expandedCount:0, errorCount:0 };
+        }
+      })()`,
+      returnByValue: true
+    });
+    return result?.value ?? { url: "", bodyLen: 0, elemCount: 0, dialogCount:0, alertCount:0, expandedCount:0, errorCount:0 };
+  } catch (_) {
+    return { url: "", bodyLen: 0, elemCount: 0, dialogCount:0, alertCount:0, expandedCount:0, errorCount:0 };
+  }
+}
+
+// Compares two domFingerprint snapshots.
+// Returns { anyChange: bool, summary: string } where summary is a human-readable
+// description injected into action history so the LLM knows what actually happened.
+function diffFingerprints(before, after) {
+  const parts = [];
+  let anyChange = false;
+
+  // Modal / dialog appeared or closed
+  const bDlg = before.dialogCount || 0;
+  const aDlg = after.dialogCount  || 0;
+  if (aDlg > bDlg) {
+    anyChange = true;
+    const newTexts = (after.dialogTexts || []).slice(bDlg).filter(Boolean);
+    parts.push(`modal appeared${newTexts.length ? ': "' + newTexts[0].slice(0,60) + '"' : ''}`);
+  } else if (aDlg < bDlg) {
+    anyChange = true;
+    parts.push("modal closed");
+  }
+
+  // Alert / live-region appeared
+  const bAlt = before.alertCount || 0;
+  const aAlt = after.alertCount  || 0;
+  if (aAlt > bAlt) {
+    anyChange = true;
+    const newTexts = (after.alertTexts || []).slice(bAlt).filter(Boolean);
+    parts.push(`notification appeared${newTexts.length ? ': "' + newTexts[0].slice(0,60) + '"' : ''}`);
+  }
+
+  // Form errors appeared or cleared
+  const bErr = before.errorCount || 0;
+  const aErr = after.errorCount  || 0;
+  if (aErr > bErr) {
+    anyChange = true;
+    const newErrs = (after.errorTexts || []).filter(function(t){ return !(before.errorTexts||[]).includes(t); });
+    parts.push(`form error${newErrs.length > 1 ? 's' : ''}: "${newErrs.slice(0,2).map(function(t){ return t.slice(0,50); }).join('" / "')}"`);
+  } else if (aErr < bErr) {
+    anyChange = true;
+    parts.push("form error cleared");
+  }
+
+  // Expanded widget count changed (accordion, dropdown)
+  const bExp = before.expandedCount || 0;
+  const aExp = after.expandedCount  || 0;
+  if (aExp !== bExp) {
+    anyChange = true;
+    const delta = aExp - bExp;
+    parts.push(delta > 0 ? (delta + " item(s) expanded") : ((-delta) + " item(s) collapsed"));
+  }
+
+  // Checkbox / radio state changed
+  if (before.checks && after.checks) {
+    const bSet = new Set(before.checks);
+    const changed = (after.checks).filter(function(v){ return !bSet.has(v); });
+    if (changed.length > 0) {
+      anyChange = true;
+      parts.push("checkbox/radio changed: " + changed.slice(0,2).join(", "));
+    }
+  }
+
+  // Input value changed (typed text, select option changed)
+  if (before.inputVals && after.inputVals) {
+    const bSet = new Set(before.inputVals);
+    const changed = (after.inputVals).filter(function(v){ return !bSet.has(v); });
+    if (changed.length > 0) {
+      anyChange = true;
+      parts.push("input changed: " + changed.slice(0,2).join(", "));
+    }
+  }
+
+  // CSS transform/position changes — catches drag-and-drop moves, chess pieces,
+  // kanban cards, sliders, and any UI that repositions elements via style only.
+  if (before.posStyles && after.posStyles && before.posStyles.length > 0) {
+    const bPos = before.posStyles.join(",");
+    const aPos = after.posStyles.join(",");
+    if (bPos !== aPos) {
+      anyChange = true;
+      if (parts.length === 0) parts.push("element positions changed");
+    }
+  }
+
+  // Significant body text volume change (>8% means meaningful content swap)
+  const bLen = before.bodyLen || 0;
+  const aLen = after.bodyLen  || 0;
+  if (bLen > 100 && Math.abs(aLen - bLen) / bLen > 0.08) {
+    anyChange = true;
+    if (parts.length === 0) parts.push("page content updated");
+  }
+
+  // Element count jumped significantly (new section rendered)
+  const bEl = before.elemCount || 0;
+  const aEl = after.elemCount  || 0;
+  if (Math.abs(aEl - bEl) > 8) {
+    anyChange = true;
+    if (parts.length === 0) {
+      parts.push("DOM updated (" + (aEl > bEl ? "+" : "") + (aEl - bEl) + " elements)");
+    }
+  }
+
+  return {
+    anyChange,
+    summary: parts.length > 0 ? " [" + parts.join("] [") + "]" : "",
+  };
 }
 
 // -- DOM stability wait -------------------------------------------------------
@@ -1961,44 +2756,32 @@ async function waitForDOMStability(tabId, maxMs = 3000, settle = 400) {
 
 async function waitForNetworkIdle(tabId, maxMs = 6000, idleMs = 500) {
   if (!tabId) return;
-  const expr = `(function(){
-    return new Promise(function(res){
-      var pending = 0, idleTimer = null;
-      function checkIdle(){
-        clearTimeout(idleTimer);
-        if(pending===0) idleTimer = setTimeout(function(){ cleanup(); res('idle'); }, ${idleMs});
+  const start = Date.now();
+  return new Promise((resolve) => {
+    let timer = null;
+
+    function check() {
+      if (Date.now() - start > maxMs) {
+        if (timer) clearTimeout(timer);
+        resolve("timeout");
+        return;
       }
-      var origFetch = window.fetch;
-      var origOpen  = XMLHttpRequest.prototype.open;
-      function cleanup(){
-        window.fetch = origFetch;
-        XMLHttpRequest.prototype.open = origOpen;
+
+      if (STATE.inFlightRequests.size === 0) {
+        if (!timer) {
+          timer = setTimeout(() => resolve("idle"), idleMs);
+        }
+      } else {
+        if (timer) {
+          clearTimeout(timer);
+          timer = null;
+        }
       }
-      window.fetch = function(){
-        pending++;
-        clearTimeout(idleTimer);
-        var p = origFetch.apply(this, arguments);
-        p.then(function(){ pending=Math.max(0,pending-1); checkIdle(); },
-               function(){ pending=Math.max(0,pending-1); checkIdle(); });
-        return p;
-      };
-      XMLHttpRequest.prototype.open = function(){
-        pending++;
-        clearTimeout(idleTimer);
-        this.addEventListener('loadend', function(){ pending=Math.max(0,pending-1); checkIdle(); }, {once:true});
-        return origOpen.apply(this, arguments);
-      };
-      setTimeout(function(){ cleanup(); res('timeout'); }, ${maxMs});
-      checkIdle();
-    });
-  })()`;
-  try {
-    await sendCDP(tabId, "Runtime.evaluate", {
-      expression: expr,
-      awaitPromise: true,
-      timeout: maxMs + 1000,
-    });
-  } catch (_) {}
+      setTimeout(check, 50);
+    }
+
+    check();
+  });
 }
 
 function setBadge(text, color) {
@@ -2045,6 +2828,7 @@ async function actGoBack(tabId) {
   }
   await waitForNetworkIdle(tabId, 3000, 300);
   await waitForDOMStability(tabId, 2000, 300);
+  STATE.elementMapDirty = true;
   const tab = await chrome.tabs.get(tabId);
   return { success: true, action_type: "go_back", url: tab.url, title: tab.title, page_changed: tab.url !== urlBefore };
 }
@@ -2063,6 +2847,7 @@ async function actGoForward(tabId) {
   }
   await waitForNetworkIdle(tabId, 3000, 300);
   await waitForDOMStability(tabId, 2000, 300);
+  STATE.elementMapDirty = true;
   const tab = await chrome.tabs.get(tabId);
   return { success: true, action_type: "go_forward", url: tab.url, title: tab.title, page_changed: tab.url !== urlBefore };
 }
@@ -2079,6 +2864,7 @@ async function actRefresh(tabId) {
   }
   await waitForNetworkIdle(tabId, 4000, 400);
   await waitForDOMStability(tabId, 2000, 300);
+  STATE.elementMapDirty = true;
   const tab = await chrome.tabs.get(tabId);
   return { success: true, action_type: "refresh", url: tab.url, title: tab.title };
 }
