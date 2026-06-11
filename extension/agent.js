@@ -684,7 +684,7 @@ export class Agent {
 
       // Check if we are waiting for a long-running process (e.g. provisioning, progress, loading, deploying)
       const pageTextContent = (state.visible_text || "").toLowerCase();
-      const isWaitingForProgress = (goal.toLowerCase() + " " + pageTextContent).match(/(provision|deploy|progress|wait|load|install|setup|percent|%|building|creating|launching|pending|available|countdown|minute|second)/i);
+      const isWaitingForProgress = (userGoal.toLowerCase() + " " + pageTextContent).match(/(provision|deploy|progress|wait|load|install|setup|percent|%|building|creating|launching|pending|available|countdown|minute|second)/i);
 
       // Repetition loops
       let maxRepeats = 3;
