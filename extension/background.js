@@ -1662,8 +1662,17 @@ async function actRead(tabId) {
 }
 
 async function actWait(tabId, a) {
+  const htmlLenBefore = await getDOMLength(tabId).catch(() => 0);
   await sleep(Math.min(a.seconds * 1000, 30000));
-  return { success: true, action_type: "wait" };
+  const htmlLenAfter = await getDOMLength(tabId).catch(() => 0);
+  const tab = await chrome.tabs.get(tabId).catch(() => null);
+  return { 
+    success: true, 
+    action_type: "wait", 
+    url: tab ? tab.url : null, 
+    title: tab ? tab.title : null, 
+    page_changed: htmlLenBefore !== htmlLenAfter 
+  };
 }
 
 // -- Debugger / CDP helpers ---------------------------------------------------

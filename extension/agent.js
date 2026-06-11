@@ -203,6 +203,25 @@ R15. WRONG RESULT — DIAGNOSE, THEN CHANGE STRATEGY.
         If auto-detection or a "smart" mode is available in the current tool, try that first.
      4. NEVER compound errors: clear previous failed attempts before trying something new.
 
+R16. DISMISS ADVERTISEMENTS, COOKIES & OVERLAYS FIRST.
+     Always check if a popup, cookie banner, subscription dialog, or advertisement overlay is blocking the main content.
+     - If a cookie banner is present: Always choose "Reject All", "Decline", "Necessary Only", "Cookie Settings" (to turn off and save), or "Close". Only click "Accept" if no reject choice is available and it blocks progress.
+     - If a promo popup or newsletter banner appears: Find the close button ("X", "Close", "No thanks", or click outside) and click it immediately to clear the page.
+
+R17. LONG-RUNNING TASKS & WAITING (e.g. PROVISIONING).
+     If the page is waiting on a progress percentage (e.g., 35%), loading spinner, status indicator (e.g., "deploying", "pending"), or a countdown timer (e.g., "available in 3 minutes"):
+     - Do NOT assume the task is stuck or completed.
+     - Call the "wait" action with "seconds" set between 10 to 30.
+     - Re-poll by calling "wait" or inspecting the page. Consecutive "wait" and "read" steps are fully allowed when waiting for active progression.
+
+R18. CAPTCHA RESOLUTION.
+     If a CAPTCHA (reCAPTCHA checkbox, Cloudflare Turnstile, etc.) blocks access:
+     - If it is a simple click-to-verify checkbox (e.g. "Verify you are human" or Turnstile check), click it.
+     - If it is a complex visual puzzle (traffic lights, crosswalks) or slide puzzle, use "ask_user" with a descriptive question to let the user solve it for you. Do not attempt to solve complex image grids yourself.
+
+R19. CONTINUOUS VERIFICATION & RE-PLANNING.
+     After each step, verify if the page state matches what you expected. If you encounter an error message, form validation failure, or if a click/action did not achieve the sub-goal, immediately update your plan. Do not keep trying the same failed action. Try another button, different input values, or use a custom "script" action.
+
 Output ONLY the JSON object. No prose, no markdown fences, no explanation outside the JSON.`;
 
 const CLICK_VERIFY_SYSTEM = `You are verifying a click target position.
@@ -663,12 +682,16 @@ export class Agent {
       recentActions.push(actionSig);
       urlHistory.push(state.url || "");
 
+      // Check if we are waiting for a long-running process (e.g. provisioning, progress, loading, deploying)
+      const pageTextContent = (state.visible_text || "").toLowerCase();
+      const isWaitingForProgress = (goal.toLowerCase() + " " + pageTextContent).match(/(provision|deploy|progress|wait|load|install|setup|percent|%|building|creating|launching|pending|available|countdown|minute|second)/i);
+
       // Repetition loops
       let maxRepeats = 3;
       if (actionSig.startsWith("scroll:")) maxRepeats = 10;
       else if (actionSig.startsWith("key:")) maxRepeats = 10;
       else if (actionSig.startsWith("click:")) maxRepeats = 5;
-      else if (actionSig === "wait") maxRepeats = 5;
+      else if (actionSig === "wait") maxRepeats = isWaitingForProgress ? 30 : 8;
 
       if (recentActions.length >= maxRepeats && new Set(recentActions.slice(-maxRepeats)).size === 1) {
         let stuckMsg = `stuck — same action (${actionSig}) repeated ${maxRepeats} times with no progress. Try a completely different approach.`;
@@ -677,16 +700,28 @@ export class Agent {
         } else if (actionSig.startsWith("click:")) {
           stuckMsg = `stuck — ${actionSig} repeated ${maxRepeats} times with no page change. Single click is not working. Try double_click, drag, or right_click instead.`;
         }
-        await AuditLogger.record({ event: "loop_detected", taskId, step: stepNum, extra: { pattern: `${maxRepeats}x_repeat`, action: actionSig } });
-        return new TaskResult(taskId, false, stuckMsg, null, null, stepNum, (Date.now() - start) / 1000);
+        
+        if (actionSig === "wait" && isWaitingForProgress) {
+          // Allow wait to repeat when waiting for long-running progress
+        } else {
+          await AuditLogger.record({ event: "loop_detected", taskId, step: stepNum, extra: { pattern: `${maxRepeats}x_repeat`, action: actionSig } });
+          return new TaskResult(taskId, false, stuckMsg, null, null, stepNum, (Date.now() - start) / 1000);
+        }
       }
 
-      if (recentActions.length >= 6 && recentActions.slice(-6).every(s => ["read", "wait"].includes(s))) {
-        await AuditLogger.record({ event: "loop_detected", taskId, step: stepNum, extra: { pattern: "read_wait_loop", actions: recentActions.slice(-6) } });
-        return new TaskResult(
-          taskId, false, "stuck — 6 consecutive 'read'/'wait' actions with no progress. Click or type instead of reading.",
-          null, null, stepNum, (Date.now() - start) / 1000
-        );
+      const readWaitLimit = isWaitingForProgress ? 30 : 8;
+      if (recentActions.length >= readWaitLimit && recentActions.slice(-readWaitLimit).every(s => ["read", "wait"].includes(s))) {
+        // If progress is active or page is changing, don't abort
+        const recentUrls = urlHistory.slice(-readWaitLimit);
+        const uniqueUrls = new Set(recentUrls);
+        
+        if (uniqueUrls.size === 1 && !isWaitingForProgress) {
+          await AuditLogger.record({ event: "loop_detected", taskId, step: stepNum, extra: { pattern: "read_wait_loop", actions: recentActions.slice(-readWaitLimit) } });
+          return new TaskResult(
+            taskId, false, `stuck — ${readWaitLimit} consecutive 'read'/'wait' actions with no progress. Click or type instead of reading.`,
+            null, null, stepNum, (Date.now() - start) / 1000
+          );
+        }
       }
 
       // A-B-A-B 2-cycle check
