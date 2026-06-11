@@ -38,76 +38,123 @@ function safePostMessage(msg) {
 function setConnDot(id, state) { $(id).className = `conn-dot ${state}`; }
 function setConnVal(id, text)  { $(id).textContent = text; }
 
+// Cloud model lists (mirrors CLOUD_MODEL_LISTS in llm.js — no import in panel context)
+const CLOUD_MODEL_LISTS = {
+  anthropic: ["claude-opus-4-8", "claude-sonnet-4-6", "claude-haiku-4-5-20251001", "claude-3-5-sonnet-latest", "claude-3-5-haiku-latest", "claude-3-opus-latest"],
+  openai:    ["gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "gpt-4", "o1", "o1-mini", "o3-mini"],
+  gemini:    ["gemini-2.5-pro-preview-06-05", "gemini-2.0-flash", "gemini-2.0-flash-lite", "gemini-1.5-pro", "gemini-1.5-flash"],
+  deepseek:  ["deepseek-chat", "deepseek-reasoner"],
+  xai:       ["grok-3-beta", "grok-3-mini-beta", "grok-2-vision-1212", "grok-2-1212"],
+  zai:       ["z1-preview"],
+};
+
+const PROVIDER_PRESETS = {
+  ollama:    { baseUrl: "http://127.0.0.1:11434/v1", needsKey: false, keyLabel: "",                       keyPlaceholder: "" },
+  lmstudio:  { baseUrl: "http://127.0.0.1:1234/v1",  needsKey: false, keyLabel: "",                       keyPlaceholder: "" },
+  anthropic: { baseUrl: "",                           needsKey: true,  keyLabel: "Anthropic API Key",       keyPlaceholder: "sk-ant-..." },
+  openai:    { baseUrl: "",                           needsKey: true,  keyLabel: "OpenAI API Key",          keyPlaceholder: "sk-..." },
+  gemini:    { baseUrl: "",                           needsKey: true,  keyLabel: "Google API Key",          keyPlaceholder: "AIza..." },
+  deepseek:  { baseUrl: "",                           needsKey: true,  keyLabel: "DeepSeek API Key",        keyPlaceholder: "sk-..." },
+  xai:       { baseUrl: "",                           needsKey: true,  keyLabel: "xAI API Key",             keyPlaceholder: "xai-..." },
+  zai:       { baseUrl: "",                           needsKey: true,  keyLabel: "z.ai API Key",            keyPlaceholder: "..." },
+  custom:    { baseUrl: "",                           needsKey: false, keyLabel: "API Key (optional)",      keyPlaceholder: "" },
+};
+
+function applyProviderUI(provider) {
+  const preset = PROVIDER_PRESETS[provider] || PROVIDER_PRESETS.custom;
+  const isLocal = !preset.needsKey && provider !== "custom";
+
+  // Show/hide API key field
+  const keyGroup = $("apiKeyGroup");
+  if (preset.needsKey || provider === "custom") {
+    keyGroup.classList.remove("hidden");
+    $("apiKeyLabel").textContent = preset.keyLabel || "API Key";
+    $("apiKeyInput").placeholder = preset.keyPlaceholder || "";
+  } else {
+    keyGroup.classList.add("hidden");
+  }
+
+  // Show/hide base URL field (local + custom always show it; cloud providers don't need it)
+  const urlGroup = $("baseUrlGroup");
+  if (isLocal || provider === "custom") {
+    urlGroup.classList.remove("hidden");
+    if (preset.baseUrl && !$("baseUrlInput").value) {
+      $("baseUrlInput").value = preset.baseUrl;
+    }
+  } else {
+    urlGroup.classList.add("hidden");
+  }
+}
+
 async function checkConnection() {
   setConnDot("orchDot", "ok");
   setConnVal("orchVal", "active");
 
   const settings = await chrome.storage.local.get({
-    baseUrl: "http://127.0.0.1:11434/v1",
+    provider:     "ollama",
+    baseUrl:      "http://127.0.0.1:11434/v1",
+    apiKey:       "",
     anthropicKey: "",
-    model: "minicpm-v:8b"
+    model:        "minicpm-v:8b",
   });
+
+  // Backward compat: if old anthropicKey exists and no provider set, treat as anthropic
+  const provider   = settings.provider || (settings.anthropicKey ? "anthropic" : "ollama");
+  const apiKey     = settings.apiKey   || settings.anthropicKey || "";
+  const cloudModels = CLOUD_MODEL_LISTS[provider];
 
   setConnDot("llmDot", "checking");
   setConnVal("llmVal", "checking…");
 
+  const sel = $("modelSelect");
+
   try {
-    if (settings.anthropicKey) {
-      setConnDot("llmDot", "ok");
-      setConnVal("llmVal", "Anthropic API");
-      
-      const sel = $("modelSelect");
+    if (cloudModels) {
+      // Cloud provider — no network check needed, just populate hard-coded model list
       sel.innerHTML = "";
-      const cloudModels = [
-        "claude-3-5-sonnet-latest",
-        "claude-3-5-haiku-latest",
-        "claude-3-opus-latest"
-      ];
       for (const m of cloudModels) {
         const opt = document.createElement("option");
-        opt.value = m;
-        opt.textContent = m;
+        opt.value = m; opt.textContent = m;
         if (m === settings.model) opt.selected = true;
         sel.appendChild(opt);
       }
       sel.disabled = false;
       $("applyModelBtn").disabled = false;
+      setConnDot("llmDot", apiKey ? "ok" : "warn");
+      setConnVal("llmVal", apiKey ? provider.toUpperCase() : `${provider.toUpperCase()} (no key)`);
+      if (!apiKey) showError(`${provider} requires an API key — open Settings and enter it.`);
+      else clearError();
     } else {
-      const tagsUrl = settings.baseUrl.replace(/\/v1\/?$/, "") + "/api/tags";
-      const resp = await fetch(tagsUrl);
-      if (!resp.ok) throw new Error("tags failed");
-      const data = await resp.json();
-      
-      const sel = $("modelSelect");
+      // Local provider (Ollama/LM Studio/custom) — probe the /api/tags or /models endpoint
+      const base    = (settings.baseUrl || "http://127.0.0.1:11434/v1").replace(/\/v1\/?$/, "");
+      const tagsUrl = base + "/api/tags";
+      const resp    = await fetch(tagsUrl, { signal: AbortSignal.timeout(4000) });
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const data   = await resp.json();
+      const models = (data.models && data.models.length ? data.models.map(m => m.name) : []);
+      if (models.length === 0 && settings.model) models.push(settings.model);
+
       sel.innerHTML = "";
-      const models = data.models && data.models.length ? data.models.map(m => m.name) : [];
-      if (models.length === 0 && settings.model) {
-        models.push(settings.model);
-      }
-      
       for (const m of models) {
         const opt = document.createElement("option");
-        opt.value = m;
-        opt.textContent = m;
+        opt.value = m; opt.textContent = m;
         if (m === settings.model) opt.selected = true;
         sel.appendChild(opt);
       }
       sel.disabled = false;
       $("applyModelBtn").disabled = false;
-      
       setConnDot("llmDot", "ok");
-      setConnVal("llmVal", settings.model || models[0] || "Ollama");
+      setConnVal("llmVal", settings.model || models[0] || provider);
+      clearError();
     }
-    clearError();
   } catch (e) {
     setConnDot("llmDot", "bad");
     setConnVal("llmVal", "offline");
     $("modelSelect").disabled = true;
     $("applyModelBtn").disabled = true;
-    showError(
-      `Local LLM server not reachable at ${settings.baseUrl}.\n` +
-      `Is Ollama running? Start it with: ollama serve`
-    );
+    if (!cloudModels) {
+      showError(`Local LLM not reachable at ${settings.baseUrl}. Is ${provider === "lmstudio" ? "LM Studio" : "Ollama"} running?`);
+    }
   }
 }
 
@@ -118,44 +165,91 @@ setInterval(checkConnection, 8000);
 
 async function loadSettings() {
   const settings = await chrome.storage.local.get({
-    baseUrl: "http://127.0.0.1:11434/v1",
+    thinking:     false,
+    provider:     "ollama",
+    baseUrl:      "http://127.0.0.1:11434/v1",
+    apiKey:       "",
     anthropicKey: "",
-    temperature: 0.2,
-    maxSteps: 100,
-    uncensored: false
+    temperature:  0.2,
+    maxSteps:     100,
+    uncensored:   false,
   });
 
-  $("baseUrlInput").value = settings.baseUrl;
-  $("anthropicKeyInput").value = settings.anthropicKey;
-  $("tempInput").value = settings.temperature;
+  // Backward compat: migrate anthropicKey → apiKey + provider=anthropic
+  const provider = settings.provider || (settings.anthropicKey && !settings.apiKey ? "anthropic" : "ollama");
+  const apiKey   = settings.apiKey || settings.anthropicKey || "";
+
+  const provSel = $("providerSelect");
+  if (provSel) provSel.value = provider;
+
+  $("baseUrlInput").value  = settings.baseUrl;
+  $("apiKeyInput").value   = apiKey;
+  $("tempInput").value     = settings.temperature;
   $("maxStepsInput").value = settings.maxSteps;
   $("uncensoredCheck").checked = settings.uncensored;
+  if ($("thinkingCheck")) $("thinkingCheck").checked = settings.thinking;
+
+  applyProviderUI(provider);
 }
 
 $("saveSettingsBtn").addEventListener("click", async () => {
-  const baseUrl = $("baseUrlInput").value.trim();
-  const anthropicKey = $("anthropicKeyInput").value.trim();
+  const provider    = ($("providerSelect") ? $("providerSelect").value : "ollama") || "ollama";
+  const preset      = PROVIDER_PRESETS[provider] || PROVIDER_PRESETS.custom;
+  const baseUrl     = preset.needsKey && provider !== "custom"
+    ? (PROVIDER_PRESETS[provider]?.baseUrl || $("baseUrlInput").value.trim())
+    : $("baseUrlInput").value.trim();
+  const apiKey      = $("apiKeyInput").value.trim();
   const temperature = parseFloat($("tempInput").value);
-  const maxSteps = parseInt($("maxStepsInput").value, 10);
-  const uncensored = $("uncensoredCheck").checked;
+  const maxSteps    = parseInt($("maxStepsInput").value, 10);
+  const uncensored  = $("uncensoredCheck").checked;
+  const thinking    = $("thinkingCheck") ? $("thinkingCheck").checked : false;
 
   try {
-    await chrome.storage.local.set({ baseUrl, anthropicKey, temperature, maxSteps, uncensored });
+    await chrome.storage.local.set({ provider, baseUrl, apiKey, temperature, maxSteps, uncensored, thinking });
     $("settingsStatus").textContent = "Settings saved";
-    $("settingsStatus").className = "status-line ok";
-    
+    $("settingsStatus").className   = "status-line ok";
     safePostMessage({ type: "update_config" });
-    
-    setTimeout(() => {
-      $("settingsStatus").textContent = "";
-    }, 2500);
-    
+    setTimeout(() => { $("settingsStatus").textContent = ""; }, 2500);
     await checkConnection();
   } catch (e) {
     $("settingsStatus").textContent = `Save failed: ${e.message}`;
-    $("settingsStatus").className = "status-line bad";
+    $("settingsStatus").className   = "status-line bad";
   }
 });
+
+if ($("downloadLogsBtn")) {
+  $("downloadLogsBtn").addEventListener("click", async () => {
+    try {
+      const data = await chrome.storage.local.get({ auditLogs: [] });
+      const logs = data.auditLogs;
+      
+      const blob = new Blob([JSON.stringify(logs, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `navy_debug_logs_${new Date().toISOString().slice(0, 10)}.json`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      alert(`Export failed: ${e.message}`);
+    }
+  });
+}
+
+// Live provider selector: update UI immediately when user switches provider
+if ($("providerSelect")) {
+  $("providerSelect").addEventListener("change", (e) => {
+    const p = e.target.value;
+    applyProviderUI(p);
+    // Auto-fill base URL for local providers
+    const preset = PROVIDER_PRESETS[p];
+    if (preset && preset.baseUrl && !preset.needsKey) {
+      $("baseUrlInput").value = preset.baseUrl;
+    }
+  });
+}
 
 // -- Error banner ------------------------------------------------------------
 
@@ -298,7 +392,7 @@ function logEntry(kind, tag, text, badge = "") {
       <div class="timeline" id="${activeTimelineId}"></div>
     `;
     logEl.appendChild(agentBubble);
-    logEl.scrollTop = logEl.scrollHeight;
+    logEl.parentElement.scrollTop = logEl.parentElement.scrollHeight;
     return;
   }
 
@@ -323,7 +417,7 @@ function logEntry(kind, tag, text, badge = "") {
     sysNode.className = "timeline-system";
     sysNode.innerHTML = `<span class="sys-tag">[${tag}]</span> ${escapeHtml(text)}`;
     timeline.appendChild(sysNode);
-    logEl.scrollTop = logEl.scrollHeight;
+    logEl.parentElement.scrollTop = logEl.parentElement.scrollHeight;
     return;
   }
 
@@ -348,7 +442,7 @@ function logEntry(kind, tag, text, badge = "") {
     </div>
   `;
   timeline.appendChild(step);
-  logEl.scrollTop = logEl.scrollHeight;
+  logEl.parentElement.scrollTop = logEl.parentElement.scrollHeight;
 }
 
 function escapeHtml(s) {
@@ -483,6 +577,21 @@ function showConfirmDialog(rid, prompt) {
   $("dialog").classList.remove("hidden");
 }
 
+function showVerifyDialog(rid, observation, verified) {
+  pendingDialog = { rid, kind: "confirm" };
+  $("dialogTitle").textContent = verified ? "Step verified — continue?" : "⚠ Verification issue";
+  $("dialogBody").textContent  = observation;
+  $("dialogInput").classList.add("hidden");
+
+  const yesBtn = $("dialogYes");
+  const noBtn  = $("dialogNo");
+  yesBtn.innerHTML = verified
+    ? `Continue <span>↵</span>`
+    : `Continue anyway <span>↵</span>`;
+  noBtn.innerHTML = `Stop task <span>ESC</span>`;
+  $("dialog").classList.remove("hidden");
+}
+
 function showAnswerDialog(rid, question) {
   pendingDialog = { rid, kind: "answer" };
   $("dialogTitle").textContent = "Navy needs input";
@@ -584,6 +693,10 @@ function handleEvent(evt) {
 
       if (evt.kind === "act") {
         logEntry("act", `STEP ${evt.step}`, thought, badge);
+      } else if (evt.kind === "verify") {
+        // Verification phase — show inline in timeline with distinct icon
+        const ok = thought.startsWith("✓");
+        logEntry(ok ? "ok" : "warn", "VERIFY", thought);
       } else if (evt.kind === "plan") {
         logEntry("plan", `PLAN`, thought);
       } else if (evt.kind === "auto") {
@@ -602,6 +715,12 @@ function handleEvent(evt) {
     case "confirm_request":
       logEntry("warn", "GATE", "agent needs confirmation");
       showConfirmDialog(evt.rid, evt.prompt);
+      break;
+
+    case "verify_request":
+      // Post-action awaiting_approval: show verification result + Continue? prompt
+      logEntry(evt.verified ? "ok" : "warn", "VERIFY", evt.observation);
+      showVerifyDialog(evt.rid, evt.observation, evt.verified);
       break;
 
     case "answer_request":
@@ -700,7 +819,7 @@ function handleEvent(evt) {
           img.addEventListener("click", () => window.open(lastScreenshot, "_blank"));
           logEl.appendChild(img);
         }
-        logEl.scrollTop = logEl.scrollHeight;
+        logEl.parentElement.scrollTop = logEl.parentElement.scrollHeight;
 
         addToScreenshotStrip(lastScreenshot);
       }).catch(() => {});
@@ -731,10 +850,54 @@ if ($("closeSettingsBtn")) {
   });
 }
 
+// -- Chat history persistence -------------------------------------------------
+// Saves the rendered chat log to session storage so it survives panel close/reopen.
+// Uses a MutationObserver + debounce — no changes to logEntry() needed.
+
+const CHAT_STORAGE_KEY = "navyChatLog";
+let chatSaveTimer = null;
+
+function saveChatHistory() {
+  chrome.storage.session.set({ [CHAT_STORAGE_KEY]: logEl.innerHTML }).catch(() => {});
+}
+
+function debouncedSave() {
+  clearTimeout(chatSaveTimer);
+  chatSaveTimer = setTimeout(saveChatHistory, 600);
+}
+
+async function restoreChatHistory() {
+  try {
+    const data = await chrome.storage.session.get(CHAT_STORAGE_KEY);
+    const html = data[CHAT_STORAGE_KEY];
+    if (!html) return;
+
+    logEl.innerHTML = html;
+    logEl.parentElement.scrollTop = logEl.parentElement.scrollHeight;
+
+    // Re-wire screenshot click-to-enlarge (event listeners don't survive innerHTML)
+    logEl.querySelectorAll("img.timeline-screenshot-thumb, img.log-screenshot").forEach(img => {
+      img.addEventListener("click", () => window.open(img.src, "_blank"));
+    });
+
+    // Restore taskIndex so the next task gets a unique timeline ID
+    const timelines = [...logEl.querySelectorAll("[id^='timeline-']")];
+    if (timelines.length > 0) {
+      const ids = timelines.map(el => parseInt(el.id.replace("timeline-", ""), 10)).filter(n => !isNaN(n));
+      if (ids.length) taskIndex = Math.max(...ids);
+    }
+  } catch (_) {}
+}
+
 // -- Init --------------------------------------------------------------------
 
 connectPort();
 loadSettings().then(() => checkConnection());
+restoreChatHistory().then(() => {
+  // Start observing AFTER restore so the initial innerHTML set doesn't trigger a save
+  const observer = new MutationObserver(debouncedSave);
+  observer.observe(logEl, { childList: true, subtree: true, characterData: true });
+});
 refreshTabStatus();
 chrome.tabs.onActivated.addListener(refreshTabStatus);
 chrome.tabs.onUpdated.addListener((tabId, info) => {

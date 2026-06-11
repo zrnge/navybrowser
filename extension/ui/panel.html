@@ -86,16 +86,40 @@
   </div>
   
   <div class="setup-body">
+    <!-- Provider selector -->
     <div class="form-group">
+      <label class="model-label">Provider</label>
+      <div class="model-selector-wrap">
+        <select id="providerSelect" class="model-select" title="LLM provider" aria-label="LLM provider">
+          <option value="ollama">Ollama (local)</option>
+          <option value="lmstudio">LM Studio (local)</option>
+          <option value="anthropic">Anthropic Claude</option>
+          <option value="openai">OpenAI / ChatGPT</option>
+          <option value="gemini">Google Gemini</option>
+          <option value="deepseek">DeepSeek</option>
+          <option value="xai">xAI / Grok</option>
+          <option value="zai">z.ai</option>
+          <option value="custom">Custom endpoint</option>
+        </select>
+        <span class="selector-arrow">▼</span>
+      </div>
+    </div>
+
+    <!-- API key (shown only for cloud providers) -->
+    <div class="form-group hidden" id="apiKeyGroup">
+      <label class="model-label" id="apiKeyLabel">API Key</label>
+      <input type="password" id="apiKeyInput" placeholder="Enter API key..." autocomplete="off">
+    </div>
+
+    <!-- Endpoint URL (shown for local / custom providers) -->
+    <div class="form-group" id="baseUrlGroup">
       <label class="model-label">LLM Endpoint URL</label>
       <input type="text" id="baseUrlInput" placeholder="http://127.0.0.1:11434/v1" autocomplete="off">
     </div>
-    
-    <div class="form-group">
-      <label class="model-label">Anthropic API Key (Optional)</label>
-      <input type="password" id="anthropicKeyInput" placeholder="sk-ant-..." autocomplete="off">
-    </div>
-    
+
+    <!-- Hidden field kept for backward compat — panel.js migrates it to apiKey -->
+    <input type="hidden" id="anthropicKeyInput">
+
     <div class="form-row">
       <div class="form-group flex-1">
         <label class="model-label">Temperature</label>
@@ -106,15 +130,21 @@
         <input type="number" id="maxStepsInput" min="1" max="200" value="100">
       </div>
     </div>
-    
+
     <div class="form-group margin-top-12">
       <label class="auto-label">
-        <input type="checkbox" id="uncensoredCheck"> Uncensored mode (bypass domain blocks)
+        <input type="checkbox" id="uncensoredCheck"> Uncensored mode — bypass all domain restrictions
+      </label>
+    </div>
+    <div class="form-group margin-top-12">
+      <label class="auto-label">
+        <input type="checkbox" id="thinkingCheck"> Quick Thinking — extended reasoning before each action (Anthropic only)
       </label>
     </div>
     
     <div class="setup-actions">
       <button type="button" id="saveSettingsBtn" class="save-settings-btn">Save Settings</button>
+      <button type="button" id="downloadLogsBtn" class="download-logs-btn" style="background:#2c2c2e; border:1px solid var(--border); color:var(--text); margin-top:8px; padding:8px 12px; border-radius:6px; cursor:pointer; font-size:11px; width:100%; transition:all 0.2s;" onmouseover="this.style.background='#3a3a3c'" onmouseout="this.style.background='#2c2c2e'">📥 Export Debug Logs</button>
     </div>
     
     <div id="settingsStatus" class="status-line"></div>

@@ -10,7 +10,7 @@
 
 import { LocalLLM } from "./llm.js";
 import { Agent } from "./agent.js";
-import { DomainPolicy } from "./security.js";
+import { DomainPolicy, AuditLogger } from "./security.js";
 
 // Chrome refuses to attach the debugger or inject scripts into its own internal
 // pages and certain protected origins. Trying to do so produces opaque errors
@@ -469,6 +469,15 @@ async function startTask(goal, tabId, autoApprove = false) {
     await saveTaskRecord(goal, result);
   } catch (err) {
     console.error("Agent execution error:", err);
+    try {
+      await AuditLogger.record({
+        event: "crash",
+        taskId: STATE.goal ? "active_task" : "none",
+        step: 0,
+        url: STATE.lastUrl,
+        extra: { error: err.message || String(err), stack: err.stack || "" }
+      });
+    } catch (_) {}
     broadcastStatus({ event: "error", message: `Agent run error: ${err.message || err}` });
   } finally {
     if (watchdogInterval) {
