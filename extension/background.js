@@ -2087,8 +2087,15 @@ async function actScript(tabId, a) {
   const tabBefore = await chrome.tabs.get(tabId);
   const urlBefore = tabBefore.url;
   const htmlLenBefore = await getDOMLength(tabId);
+  let expression = a.code || "";
+  // Wrap top-level returns in an async IIFE to prevent Illegal return statement SyntaxErrors
+  const trimmed = expression.trim();
+  if (expression.includes("return") && !trimmed.startsWith("(") && !trimmed.startsWith("function") && !trimmed.startsWith("async")) {
+    expression = `(async () => {\n${expression}\n})()`;
+  }
+
   const { result, exceptionDetails } = await sendCDP(tabId, "Runtime.evaluate", {
-    expression: a.code,
+    expression,
     returnByValue: true,
     userGesture: true,
     awaitPromise: true,
