@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "author": "Zrnge",
   "homepage_url": "https://github.com/zrnge/navybrowser",
-  "description": "Local AI browser automation agent. Fully private with Ollama or LM Studio. When using cloud AI providers, page content is sent to your chosen provider to complete tasks.",
+  "description": "AI browser automation agent. Private with Ollama or LM Studio. When using cloud providers, page content is sent to their API.",
 
   "icons": {
     "16": "ui/icon16.png",
