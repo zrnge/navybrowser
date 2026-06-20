@@ -4,7 +4,13 @@
   "version": "0.1.0",
   "author": "Zrnge",
   "homepage_url": "https://github.com/zrnge/navybrowser",
-  "description": "Privacy-first browser automation driven by your local AI. No data leaves your machine.",
+  "description": "Local AI browser automation agent. Fully private with Ollama or LM Studio. When using cloud AI providers, page content is sent to your chosen provider to complete tasks.",
+
+  "icons": {
+    "16": "ui/icon16.png",
+    "48": "ui/icon48.png",
+    "128": "ui/icon128.png"
+  },
 
   "permissions": [
     "debugger",
@@ -13,12 +19,15 @@
     "tabs",
     "activeTab",
     "storage",
-    "alarms"
+    "tabGroups",
+    "clipboardWrite",
+    "downloads",
+    "tabCapture",
+    "offscreen"
   ],
 
   "host_permissions": [
-    "https://*/*",
-    "http://*/*"
+    "<all_urls>"
   ],
 
   "background": {
@@ -57,7 +66,7 @@
   },
 
   "content_security_policy": {
-    "extension_pages": "script-src 'self'; object-src 'self'; connect-src http://127.0.0.1:* https://api.anthropic.com"
+    "extension_pages": "script-src 'self'; object-src 'self';"
   },
 
   "minimum_chrome_version": "116"

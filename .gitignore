@@ -29,3 +29,13 @@ yarn-error.log*
 node_modules/
 dist/
 build/
+
+# Scratch / temporary files
+diff_scratch.txt
+*.scratch.*
+models/
+
+# Chrome extension build artifacts
+*.crx
+*.pem
+*.zip

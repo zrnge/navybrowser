@@ -18,6 +18,7 @@
       <span class="dot" id="statusDot"></span>
     </div>
     <div class="hdr-actions">
+      <button type="button" id="newChatBtn" class="new-chat-btn" title="New chat">＋</button>
       <button type="button" id="advancedToggle" class="settings-toggle-btn" title="Advanced settings">⚙</button>
     </div>
   </div>
@@ -74,6 +75,35 @@
 
 <!-- Main scrollable chat history container -->
 <main class="chat-area">
+  <!-- Quick Actions Grid (shown when log is empty) -->
+  <div id="emptyState" class="empty-state">
+    <div class="empty-welcome">
+      <svg class="brand-logo" viewBox="0 0 24 24" width="40" height="40" style="margin-bottom:12px;">
+        <path d="M12,2 L14,7 L19,6 L17,11 L22,12 L17,13 L19,18 L14,17 L12,22 L10,17 L5,18 L7,13 L2,12 L7,11 L5,6 L10,7 Z" fill="var(--accent-aqua)" />
+      </svg>
+      <h3>Welcome to Navy</h3>
+      <p>I am your local browser automation agent. Choose a quick action or type your own goal below.</p>
+    </div>
+    <div class="quick-actions-grid">
+      <button type="button" class="qa-card" data-goal="Search for 'Quantum Computing' online and summarize the key concepts">
+        <span class="qa-icon">🔍</span>
+        <span class="qa-title">Research a Topic</span>
+      </button>
+      <button type="button" class="qa-card" data-goal="Find a tech news website and extract the top 5 headlines">
+        <span class="qa-icon">📰</span>
+        <span class="qa-title">Get News Headlines</span>
+      </button>
+      <button type="button" class="qa-card" data-goal="Find flight prices from New York to London and show me the cheapest options">
+        <span class="qa-icon">✈️</span>
+        <span class="qa-title">Find Flights</span>
+      </button>
+      <button type="button" class="qa-card" data-goal="Find trending open source projects today and tell me the most popular one">
+        <span class="qa-icon">📦</span>
+        <span class="qa-title">Find Trending Projects</span>
+      </button>
+    </div>
+  </div>
+
   <div id="log" class="chat-history"></div>
   <div id="screenshotStrip" class="screenshot-strip hidden"></div>
 </main>
@@ -99,6 +129,8 @@
           <option value="deepseek">DeepSeek</option>
           <option value="xai">xAI / Grok</option>
           <option value="zai">z.ai</option>
+          <option value="groq">Groq</option>
+          <option value="openrouter">OpenRouter</option>
           <option value="custom">Custom endpoint</option>
         </select>
         <span class="selector-arrow">▼</span>
@@ -132,6 +164,19 @@
     </div>
 
     <div class="form-group margin-top-12">
+      <label class="model-label">Auto-approve by action type</label>
+      <div id="autoApproveTypes" class="approve-types-grid">
+        <label class="auto-label"><input type="checkbox" data-bucket="read"> Read / Screenshot</label>
+        <label class="auto-label"><input type="checkbox" data-bucket="navigate"> Navigate / Tabs</label>
+        <label class="auto-label"><input type="checkbox" data-bucket="click"> Click / Hover</label>
+        <label class="auto-label"><input type="checkbox" data-bucket="type"> Type / Select</label>
+        <label class="auto-label"><input type="checkbox" data-bucket="scroll"> Scroll</label>
+        <label class="auto-label"><input type="checkbox" data-bucket="drag"> Drag</label>
+        <label class="auto-label"><input type="checkbox" data-bucket="script"> Script / Fetch</label>
+        <label class="auto-label"><input type="checkbox" data-bucket="file"> File Upload</label>
+      </div>
+    </div>
+    <div class="form-group margin-top-12">
       <label class="auto-label">
         <input type="checkbox" id="uncensoredCheck"> Uncensored mode — bypass all domain restrictions
       </label>
@@ -144,7 +189,7 @@
     
     <div class="setup-actions">
       <button type="button" id="saveSettingsBtn" class="save-settings-btn">Save Settings</button>
-      <button type="button" id="downloadLogsBtn" class="download-logs-btn" style="background:#2c2c2e; border:1px solid var(--border); color:var(--text); margin-top:8px; padding:8px 12px; border-radius:6px; cursor:pointer; font-size:11px; width:100%; transition:all 0.2s;" onmouseover="this.style.background='#3a3a3c'" onmouseout="this.style.background='#2c2c2e'">📥 Export Debug Logs</button>
+      <button type="button" id="downloadLogsBtn" class="download-logs-btn">📥 Export Debug Logs</button>
     </div>
     
     <div id="settingsStatus" class="status-line"></div>
@@ -169,7 +214,7 @@
       </div>
       
       <!-- Hidden checkbox to map back to original panel.js bindings -->
-      <input type="checkbox" id="autoApproveCheck" style="display:none;">
+      <input type="checkbox" id="autoApproveCheck" class="hidden-checkbox" aria-hidden="true" title="Auto-approve actions">
       
       <div class="input-actions">
         <!-- Stop Button -->
@@ -223,6 +268,129 @@
       Navy will not purchase items, create accounts, or bypass captchas without input. Revoke site permissions in settings.
     </div>
   </div>
+</div>
+
+<!-- Wrong tab overlay -->
+<div id="wrongTabOverlay" class="wrong-tab-overlay hidden">
+  <div class="overlay-content">
+    <div class="overlay-icon">⚠️</div>
+    <h2>Agent active on another tab</h2>
+    <p>Navy is running a task on a different tab. Switch back to follow along or control the task.</p>
+    <button type="button" id="switchToTaskTabBtn" class="primary-btn">Switch to Task Tab</button>
+  </div>
+</div>
+
+<!-- Lightbox popup modal for screenshots -->
+<div id="lightbox" class="lightbox hidden">
+  <img id="lightboxImg" src="" alt="Enlarged screenshot">
+</div>
+
+<!-- First-run onboarding wizard (shown when no provider is configured) -->
+<div id="onboardingOverlay" class="ob-overlay hidden" role="dialog" aria-modal="true" aria-label="Navy setup wizard">
+
+  <!-- Step 1: Welcome + choose path -->
+  <div class="ob-step" id="obStep1">
+    <svg class="ob-logo" viewBox="0 0 24 24" width="48" height="48">
+      <path d="M12,2 A3,3 0 0,0 9,5 A3,3 0 0,0 11,7.8 L11,9 L6,9 A1,1 0 0,0 5,10 A1,1 0 0,0 6,11 L11,11 L11,16.1 A6,6 0 0,1 6.2,12 L7.5,12 A1,1 0 0,0 8.5,11 A1,1 0 0,0 7.5,10 L4,10 A1,1 0 0,0 3,11 L3,14.5 A1,1 0 0,0 4,15.5 A1,1 0 0,0 5,14.5 L5,13.8 A8,8 0 0,0 11,18.1 L11,21 A1,1 0 0,0 12,22 A1,1 0 0,0 13,21 L13,18.1 A8,8 0 0,0 19,13.8 L19,14.5 A1,1 0 0,0 20,15.5 A1,1 0 0,0 21,14.5 L21,11 A1,1 0 0,0 20,10 L16.5,10 A1,1 0 0,0 15.5,11 A1,1 0 0,0 16.5,12 L17.8,12 A6,6 0 0,1 13,16.1 L13,11 L18,11 A1,1 0 0,0 19,10 A1,1 0 0,0 18,9 L13,9 L13,7.8 A3,3 0 0,0 15,5 A3,3 0 0,0 12,2 Z M12,4 A1,1 0 1,1 12,6 A1,1 0 1,1 12,4 Z" fill="var(--accent-aqua)"/>
+    </svg>
+    <h2 class="ob-title">Welcome to Navy</h2>
+    <p class="ob-sub">Navy uses an AI model to control your browser and complete tasks on your behalf. Let's connect one — takes about 2 minutes.</p>
+    <p class="ob-sub">How would you like to run the AI?</p>
+    <div class="ob-choice-grid">
+      <button type="button" class="ob-choice-card" id="obChooseLocal">
+        <span class="ob-choice-icon">🖥️</span>
+        <strong>Free &amp; Private</strong>
+        <span class="ob-choice-sub">Runs on your computer.<br>Nothing leaves your machine.</span>
+      </button>
+      <button type="button" class="ob-choice-card" id="obChooseCloud">
+        <span class="ob-choice-icon">☁️</span>
+        <strong>Cloud AI</strong>
+        <span class="ob-choice-sub">Claude, GPT-4, Gemini…<br>Needs an API key.</span>
+      </button>
+    </div>
+    <button type="button" class="ob-skip-link" id="obSkip">I already set this up — skip</button>
+  </div>
+
+  <!-- Step 2A: Local (Ollama) -->
+  <div class="ob-step hidden" id="obStep2Local">
+    <button type="button" class="ob-back-btn" id="obBack2Local">← Back</button>
+    <h2 class="ob-title">Set up Ollama <span class="ob-badge">Free</span></h2>
+    <p class="ob-sub">Ollama runs AI models locally on your computer. No account needed, no data leaves your machine.</p>
+    <ol class="ob-steps-list">
+      <li>
+        <strong>Download and install Ollama</strong>
+        <a href="https://ollama.com/download" target="_blank" rel="noopener" class="ob-link">ollama.com/download →</a>
+      </li>
+      <li>
+        <strong>Open a terminal and run this command:</strong>
+        <div class="ob-code-row">
+          <code class="ob-code" id="obOllamaCmd">ollama pull minicpm-v:8b</code>
+          <button type="button" class="ob-copy-btn" data-copy="ollama pull minicpm-v:8b" title="Copy command">Copy</button>
+        </div>
+        <span class="ob-hint">Downloads the AI model (~5 GB). Takes a few minutes on first run.</span>
+      </li>
+      <li>
+        <strong>Come back here when the download finishes, then click Test below.</strong>
+      </li>
+    </ol>
+    <button type="button" class="ob-primary-btn" id="obTestLocal">Test Ollama Connection →</button>
+    <div id="obLocalStatus" class="ob-status-line"></div>
+  </div>
+
+  <!-- Step 2B: Cloud — choose provider -->
+  <div class="ob-step hidden" id="obStep2Cloud">
+    <button type="button" class="ob-back-btn" id="obBack2Cloud">← Back</button>
+    <h2 class="ob-title">Choose a provider</h2>
+    <p class="ob-sub">Page content will be sent to the provider you choose to complete tasks. <strong>Navy's developer never receives your data.</strong></p>
+    <div class="ob-provider-grid">
+      <button type="button" class="ob-provider-btn" data-provider="anthropic">Anthropic Claude</button>
+      <button type="button" class="ob-provider-btn" data-provider="openai">OpenAI / ChatGPT</button>
+      <button type="button" class="ob-provider-btn" data-provider="gemini">Google Gemini</button>
+      <button type="button" class="ob-provider-btn" data-provider="deepseek">DeepSeek</button>
+      <button type="button" class="ob-provider-btn" data-provider="xai">xAI / Grok</button>
+      <button type="button" class="ob-provider-btn" data-provider="groq">Groq (fast &amp; free tier)</button>
+      <button type="button" class="ob-provider-btn" data-provider="openrouter">OpenRouter (many models)</button>
+    </div>
+  </div>
+
+  <!-- Step 2C: Cloud — enter API key -->
+  <div class="ob-step hidden" id="obStep2CloudKey">
+    <button type="button" class="ob-back-btn" id="obBack2CloudKey">← Back</button>
+    <h2 class="ob-title ob-title-row">
+      <span id="obCloudProviderName">Provider</span> API Key
+    </h2>
+    <p class="ob-sub" id="obCloudKeyHint">Get your API key from the provider's website, then paste it below.</p>
+    <a href="#" target="_blank" rel="noopener" class="ob-link" id="obCloudKeyLink">Open provider dashboard →</a>
+    <div class="ob-key-field-wrap">
+      <input type="password" id="obApiKeyInput" class="ob-key-input" placeholder="Paste your API key here…" autocomplete="off" aria-label="API key">
+      <button type="button" class="ob-toggle-visibility" id="obToggleKey" title="Show/hide key">👁</button>
+    </div>
+    <button type="button" class="ob-primary-btn" id="obTestCloud">Test Connection →</button>
+    <div id="obCloudStatus" class="ob-status-line"></div>
+  </div>
+
+  <!-- Step 3: Testing -->
+  <div class="ob-step hidden" id="obStep3">
+    <div class="ob-spinner-wrap">
+      <div class="ob-spinner"></div>
+    </div>
+    <p class="ob-sub" id="obTestingMsg">Testing connection…</p>
+  </div>
+
+  <!-- Step 4: Success -->
+  <div class="ob-step hidden" id="obStep4">
+    <div class="ob-success-icon">✓</div>
+    <h2 class="ob-title">You're ready!</h2>
+    <p class="ob-sub" id="obSuccessMsg">Navy is connected and ready to automate tasks.</p>
+    <div class="ob-tip-box">
+      <strong>Quick tip:</strong> Type any goal in the box below and press Enter. For example:<br>
+      <em>"Find the top headlines on BBC News"</em><br>
+      <em>"Fill out this contact form with my details"</em><br>
+      <em>"Search Amazon for the cheapest USB-C hub under $30"</em>
+    </div>
+    <button type="button" class="ob-primary-btn" id="obFinish">Start Using Navy →</button>
+  </div>
+
 </div>
 
 <script src="panel.js"></script>

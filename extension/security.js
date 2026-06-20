@@ -31,14 +31,15 @@ export class DomainPolicy {
   }
 
   isSensitive(url) {
-    if (this.uncensored) return false;
     const host = getHostname(url);
     if (!host) return false;
 
-    for (const blocked of this.userDenylist) {
+    // Built-in sensitive domains are always protected — uncensored mode does NOT bypass these
+    for (const blocked of BUILTIN_SENSITIVE_DOMAINS) {
       if (host === blocked || host.endsWith("." + blocked)) return true;
     }
-    for (const blocked of BUILTIN_SENSITIVE_DOMAINS) {
+    if (this.uncensored) return false;
+    for (const blocked of this.userDenylist) {
       if (host === blocked || host.endsWith("." + blocked)) return true;
     }
     return false;
@@ -96,6 +97,21 @@ export function sanitizePageText(text, maxLen = 8000) {
   return { wrapped, warnings };
 }
 
+// Lightweight sanitizer for short inline strings (element labels, form field names/values).
+// Unlike sanitizePageText, this does NOT wrap in <UNTRUSTED> tags because the strings
+// appear inline inside structured data (ELEMENT_MAP, form state). Instead it blocks the
+// entire string and returns a warning when an injection pattern is detected.
+export function sanitizeLabel(str, maxLen = 80) {
+  if (!str) return { clean: "", warned: false };
+  const truncated = str.length > maxLen ? str.substring(0, maxLen) + "…" : str;
+  for (const pat of INJECTION_PATTERNS) {
+    if (pat.test(truncated)) {
+      return { clean: "[BLOCKED: injection attempt detected in page label]", warned: true };
+    }
+  }
+  return { clean: truncated, warned: false };
+}
+
 const CRED_FIELD_HINTS = /(password|passwd|pwd|secret|token|api[_-]?key|ssn|social|card[_-]?number|cvv|cvc|pin|otp|2fa|mfa)/i;
 
 export function looksLikeCredentialField(fieldName, fieldType) {
@@ -125,8 +141,40 @@ export class PolicyDecision {
   }
 }
 
+// Returns true for loopback, link-local, and RFC-1918 private IP hostnames.
+// Used to block SSRF via actFetch (service worker can reach any network the
+// browser host can reach — including routers, dev servers, and AWS metadata).
+function _isPrivateHost(host) {
+  if (host === "localhost") return true;
+  // IPv6 loopback
+  if (host === "::1" || host === "[::1]") return true;
+  const parts = host.replace(/^\[|\]$/g, "").split(".").map(Number);
+  if (parts.length !== 4 || parts.some(isNaN)) return false;
+  const [a, b] = parts;
+  return (
+    a === 127 ||                          // 127.0.0.0/8  loopback
+    a === 10 ||                           // 10.0.0.0/8   RFC-1918
+    (a === 172 && b >= 16 && b <= 31) ||  // 172.16.0.0/12 RFC-1918
+    (a === 192 && b === 168) ||           // 192.168.0.0/16 RFC-1918
+    (a === 169 && b === 254)              // 169.254.0.0/16 link-local (AWS metadata etc.)
+  );
+}
+
 export function evaluateAction(action, currentUrl, policy) {
   const t = action.type;
+
+  if (t === "batch") {
+    if (!Array.isArray(action.actions) || action.actions.length === 0) {
+      return new PolicyDecision(false, "batch action has no actions list");
+    }
+    for (const subAction of action.actions) {
+      const decision = evaluateAction(subAction, currentUrl, policy);
+      if (!decision.allow) {
+        return decision;
+      }
+    }
+    return new PolicyDecision(true, "batch permitted by policy");
+  }
 
   if (["read", "wait", "done", "ask_user", "abort"].includes(t)) {
     return new PolicyDecision(true, "non-side-effecting");
@@ -155,6 +203,28 @@ export function evaluateAction(action, currentUrl, policy) {
 
   if (t === "type" && action.isSensitive) {
     return new PolicyDecision(false, "action targets sensitive field", true);
+  }
+
+  // Cross-origin fetch must be confirmed by the user — the LLM cannot self-authorize it.
+  // Additionally, fetches to loopback/RFC-1918 ranges are hard-blocked regardless of page origin
+  // to prevent SSRF against local services (routers, dev servers, cloud metadata endpoints, etc.).
+  if (t === "fetch") {
+    if (!action.url) return new PolicyDecision(false, "fetch requires a url");
+    let fetchUrl;
+    try {
+      fetchUrl = new URL(action.url);
+    } catch (_) {
+      return new PolicyDecision(false, "fetch has an invalid url");
+    }
+    const hostname = fetchUrl.hostname.toLowerCase();
+    if (_isPrivateHost(hostname)) {
+      return new PolicyDecision(false, `fetch to private/loopback address ${hostname} is not permitted`);
+    }
+    const fetchOrigin = fetchUrl.origin;
+    const pageOrigin  = currentUrl ? new URL(currentUrl).origin : null;
+    if (!pageOrigin || fetchOrigin !== pageOrigin) {
+      return new PolicyDecision(false, `cross-origin fetch to ${fetchOrigin}`, true);
+    }
   }
 
   return new PolicyDecision(true, "permitted by policy");

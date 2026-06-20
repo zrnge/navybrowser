@@ -3,24 +3,27 @@
 [![Chrome MV3](https://img.shields.io/badge/Manifest-V3-brightgreen.svg)](#)
 [![Developer](https://img.shields.io/badge/Developer-Zrnge-orange.svg)](https://zrnge.github.io)
 [![Repository](https://img.shields.io/badge/Repo-zrnge%2Fnavybrowser-blue.svg)](https://github.com/zrnge/navybrowser)
-[![Privacy First](https://img.shields.io/badge/Privacy-First-blueviolet.svg)](#)
+[![Local First](https://img.shields.io/badge/Local-First-blueviolet.svg)](#)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](#)
 
-Navy is a privacy-first, serverless Chrome Manifest V3 web extension that runs an autonomous browser automation agent loop directly inside your browser's service worker. 
+Navy is a serverless Chrome Manifest V3 extension that runs an autonomous browser automation agent loop directly inside your browser's service worker.
 
-Navy connects directly to local LLMs (like Ollama or llama.cpp) or cloud endpoints (Anthropic Claude API) to automate complex visual and structural tasks—such as clicking, typing, page transitions, keypresses, and custom drag-and-drop actions—completely client-side. No remote orchestrator, server backend, or Python installation is required.
+Navy connects to your chosen AI model — local (Ollama, LM Studio) or cloud (Anthropic Claude, OpenAI, Google Gemini, DeepSeek, xAI Grok, Groq, OpenRouter, and more) — to automate complex visual and interactive tasks: clicking, typing, scrolling, dragging, tab management, form filling, and arbitrary script execution. No remote orchestrator, server backend, or Python installation is required.
+
+**Privacy:** When using Ollama or LM Studio, all processing is local and no data leaves your machine. When using a cloud provider, page content and screenshots are sent to that provider's API to perform the task. Navy's developer never receives any data. See [PRIVACY.md](PRIVACY.md) for full details.
 
 ---
 
 ## Key Features
 
-- **Pure Browser Extension (MV3)**: 100% JavaScript codebase running completely inside a native background service worker. Load the extension and start automating immediately.
-- **Privacy First & Secure**: Includes a robust `DomainPolicy` engine supporting custom domain allowlists, user denylists, and sensitive domain blocks (banks, password managers, healthcare, etc.).
-- **Credentials Masking**: Automatically detects password/credentials inputs and masks them using SHA-256 hash digests inside the audit log.
-- **Local & Cloud LLMs**: Seamlessly toggle between local Ollama instances (`Qwen2.5`, `minicpm-v:8b`) and Anthropic Claude cloud endpoints directly from the sidebar UI settings.
-- **Polished, Claude-Inspired Chat UI**: Features a charcoal base theme with glowing aqua-cyan outlines pulsing around the target viewport to indicate active automation states.
-- **Media Control Tips**: Injects custom prompt rules and API helpers for media player actions, enabling the agent to adjust volume (using YouTube player APIs) or speed up playback (2x speed) in a single script step.
-- **Polished Input Event Handling**: Support standard keyboard inputs (Enter to send, Shift+Enter for newlines) and immediate Enter key submissions inside permissions dialog inputs.
+- **Pure Browser Extension (MV3)**: 100% JavaScript, runs entirely inside a Chrome service worker. Load unpacked and start automating immediately — no install, no backend.
+- **12 AI Providers**: Ollama, LM Studio, Anthropic Claude, OpenAI, Google Gemini, DeepSeek, xAI Grok, Groq, z.ai, OpenRouter, and any custom OpenAI-compatible endpoint. Swap models without reloading.
+- **Uses Your Own Browser Session**: Operates inside your real Chrome profile — your existing cookies, logins, and saved state are available to every task.
+- **Rich Action Set**: Click, double-click, right-click, type, scroll, drag, hover, key combos, select, fetch (HTTP calls from page context), script (arbitrary JS), batch, tab management, audio transcription, and more.
+- **Two-Tier Planning Loop**: Decomposes goals into subtasks, executes step-by-step with screenshot + accessibility tree reasoning, and re-plans dynamically when stuck.
+- **Domain Policy & Credentials Masking**: Built-in block list for banking and identity sites. Password fields and credential-like inputs are SHA-256 hashed before appearing in audit logs.
+- **CAPTCHA Handling**: Attempts image CAPTCHAs visually, audio CAPTCHAs via tab audio transcription, and checkbox CAPTCHAs autonomously.
+- **Panic Stop**: `Ctrl+Shift+.` (or `Cmd+Shift+.`) immediately aborts any running task.
 
 ---
 
@@ -34,8 +37,8 @@ graph TD
     SW -->|instantiates| LLM[LLM Client: llm.js]
     Agent -->|calls| SW_CDP[CDP Executor & Snapshotter]
     SW_CDP -->|chrome.debugger| Browser[Target Tab Page Context]
-    LLM -->|fetch| Ollama[Local Ollama Server: 11434]
-    LLM -->|fetch| Anthropic[Anthropic API Cloud Endpoint]
+    LLM -->|fetch| Local[Local LLM: Ollama / LM Studio]
+    LLM -->|fetch| Cloud[Cloud AI: Anthropic · OpenAI · Gemini · DeepSeek · Grok · Groq · OpenRouter · …]
 ```
 
 ---
@@ -46,15 +49,18 @@ graph TD
 navybrowser/
 ├── extension/                  Chrome MV3 Extension Root
 │   ├── manifest.json           Extension metadata & permissions
-│   ├── background.js           Service worker & CDP executor interface
-│   ├── agent.js                Native planning loop & prompt builder
-│   ├── llm.js                  Ollama & Anthropic API clients
-│   ├── security.js             DomainPolicy & AuditLogger
+│   ├── background.js           Service worker, CDP executor & action handlers
+│   ├── agent.js                Planning loop, system prompts & world state
+│   ├── llm.js                  Multi-provider LLM client (12 providers)
+│   ├── security.js             DomainPolicy, AuditLogger & injection detection
+│   ├── offscreen.html          Offscreen document for tab audio capture
+│   ├── offscreen.js            MediaRecorder bridge for the listen action
 │   └── ui/
 │       ├── panel.html          Sidebar layout & Settings Drawer
-│       ├── panel.css           Theme colors, keyframes, & dropdowns
+│       ├── panel.css           Theme colors, keyframes & dropdowns
 │       ├── panel.js            Sidebar event listeners & timeline builder
-│       └── icon{16,48,128}.png Resized ship's anchor theme icons
+│       └── icon{16,48,128}.png Ship's anchor icons
+├── PRIVACY.md                  Privacy policy
 └── README.md                   This documentation
 ```
 
@@ -68,13 +74,19 @@ navybrowser/
 3. Click **Load unpacked** (top-left) and select the `extension/` folder inside this repository.
 4. The **Navy** anchor icon will appear in your extensions list.
 
-### 2. Configure Your LLM & Environment Variables
+### 2. Configure Your AI Provider
 1. Click the Navy anchor icon in the toolbar or open it via the Side Panel dropdown.
 2. Click the gear icon (**⚙**) in the top-right corner to open **Agent Settings**.
-3. Configure your endpoint:
-   - **Local Ollama (Offline)**: Keep the default URL (`http://127.0.0.1:11434/v1`) or point to llama.cpp. Ensure `ollama serve` is running in your terminal.
-   - **Cloud Claude (Recommended)**: Paste your Anthropic API Key (e.g. `sk-ant-...`) in the API Key input.
+3. Select a provider and configure it:
+   - **Ollama (fully local, free)**: Keep the default URL (`http://127.0.0.1:11434/v1`). Ensure `ollama serve` is running. No API key needed.
+   - **LM Studio (fully local, free)**: Set the URL to `http://127.0.0.1:1234/v1`. No API key needed.
+   - **Anthropic Claude**: Select "Anthropic Claude" and paste your `sk-ant-...` API key.
+   - **OpenAI / ChatGPT**: Select "OpenAI" and paste your `sk-...` API key.
+   - **Google Gemini, DeepSeek, xAI Grok, Groq, OpenRouter**: Select the provider and paste the corresponding API key.
+   - **Custom endpoint**: Enter any OpenAI-compatible base URL.
 4. Click **Save Settings**.
+
+> **Privacy note:** Ollama and LM Studio keep all data on your machine. Cloud providers receive page content and screenshots as part of the task. See [PRIVACY.md](PRIVACY.md).
 
 #### Setting Terminal Environment Variables (All OS)
 To connect the Chrome extension to a local Ollama server, you must configure Cross-Origin Resource Sharing (CORS) by setting the `OLLAMA_ORIGINS` environment variable before running Ollama:
@@ -149,6 +161,7 @@ node --check extension/security.js
 Navy is designed, developed, and maintained by **Zrnge**.
 - **Personal Website / Portfolio**: [zrnge.github.io](https://zrnge.github.io)
 - **GitHub Repository**: [github.com/zrnge/navybrowser](https://github.com/zrnge/navybrowser)
+- **Privacy Policy**: [PRIVACY.md](PRIVACY.md)
 
 Feel free to star the repository, open issues, or submit pull requests!
 
