@@ -68,6 +68,28 @@ Both uses are scoped to the single tab being automated, triggered only while a t
 
 ---
 
+### Content script (`canvas-hook.js`, `<all_urls>`, MAIN world, `document_start`)
+
+**Why it is declared this way:**
+`canvas-hook.js` is a small, static, locally bundled content script. It solves a fundamental gap in DOM-based automation: an HTML5 `<canvas>` is a single opaque pixel surface, so everything a canvas app draws inside it — text labels, buttons, cards, game pieces — is invisible to the DOM and therefore invisible to Navy's element-mapping system. Without this hook, the AI can only guess at click coordinates from a screenshot.
+
+The hook wraps the standard 2D canvas drawing calls (`fillText`, `strokeText`, `drawImage`, and the `clearRect`/`fillRect` frame-boundary signals) to record *where* text and sprites are drawn, in CSS-pixel coordinates. Navy later reads those positions (via `window.__navy_canvas_elements()`) so the AI can click canvas content precisely instead of estimating.
+
+**Why each declaration flag is required:**
+- **`document_start`** — the wrappers must be installed *before* the page's own JavaScript captures references to the native canvas methods. Injecting later (e.g. lazily when a task starts) would miss every draw call the page already made, so the hook cannot be deferred.
+- **MAIN world** — the wrappers must live in the page's own JavaScript realm to intercept the page's canvas calls. An isolated-world content script cannot see or wrap the page's `CanvasRenderingContext2D.prototype`.
+- **`<all_urls>`** — Navy can be directed at any site (see the host-permission section), so the surface it may need to read is not known in advance.
+
+**Scope and limits of what it does:**
+- It only ever **reads** drawing coordinates. It records the position and text of draw calls into an in-page, time/frame-evicted cache. It transmits nothing, writes nothing to the page, alters no page behavior, and reads no cookies, storage, form values, or network data.
+- All original canvas methods are called through unchanged, so page rendering is byte-for-byte identical with or without the hook.
+- It contains no remote code and makes no network requests. It is part of the signed extension package (see the Remote Code Execution Policy below).
+- Memory is bounded (per-canvas caps with oldest-first eviction) and layout reads are cached, so the per-page cost is negligible and does not grow over time.
+
+The recorded coordinates are only ever *consumed* while a task is running on the active tab; on all other tabs the cache simply sits idle until the canvas is garbage-collected.
+
+---
+
 ### `tabs`
 
 **Why it is needed:**
@@ -77,6 +99,7 @@ The `tabs` permission (which grants access to the `url` and `title` properties o
 2. **Tab management actions:** The user can ask Navy to open a new tab, switch between tabs (e.g., "go back to the previous tab"), or close a tab as part of a task.
 3. **Tab group management:** Navy groups its working tab into a Chrome tab group so the user can visually distinguish automated tabs from their personal tabs.
 4. **Listing tabs in scope:** When the user asks "what tabs are open?", Navy returns only the tabs in the current window or task group — not all tabs across all windows.
+5. **PDF export:** Clicking the "Export as PDF" button on a result opens a single new tab containing only that result, formatted as a printable report, and triggers the browser's native print dialog there. This runs only on explicit user click — never automatically — and the new tab is a `chrome-extension://` page bundled in the extension itself (`ui/report.html`), not a third-party or remote URL.
 
 ---
 
@@ -97,8 +120,11 @@ The `tabs` permission (which grants access to the `url` and `title` properties o
 - Debug logs (the last 500 log entries, exportable by the user)
 - User's domain allowlist/denylist preferences
 
-`chrome.storage.session` stores:
-- The current conversation/task history (cleared when the browser closes)
+`chrome.storage.local` also stores:
+- The current conversation/task history (cleared at the start of each new task)
+
+`chrome.storage.session` (cleared automatically when the browser closes, never written to disk) stores:
+- The title and Markdown text of a single result, only while the PDF export tab is loading it — removed immediately once that tab reads it.
 
 No data is written to `chrome.storage.sync` — nothing is sent to Google's servers via Chrome Sync.
 
@@ -149,6 +175,20 @@ When a task completes, the user can click a "Copy result" button in the side pan
 
 **Why it is needed:**
 The Settings panel includes an "Export Debug Logs" button that saves the local debug log to a JSON file on the user's machine via `chrome.downloads.download`. This is the only use. The downloaded file goes to the browser's default downloads folder and is never sent to any server.
+
+---
+
+### `bookmarks`
+
+**Why it is needed:**
+Navy supports the `bookmark` action type, which allows the AI agent to search, add, or delete bookmarks upon the user's direct instruction (e.g., "bookmark this page" or "find my bookmarked link for GitHub").
+
+---
+
+### `history`
+
+**Why it is needed:**
+Navy supports the `history_search` action type, which allows the AI agent to search the user's local browsing history to retrieve previously visited pages when explicitly requested (e.g., "search my history for that recipe I opened yesterday").
 
 ---
 

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Navy",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "author": "Zrnge",
   "homepage_url": "https://github.com/zrnge/navybrowser",
   "description": "AI browser automation agent. Private with Ollama or LM Studio. When using cloud providers, page content is sent to their API.",
@@ -13,6 +13,7 @@
   },
 
   "permissions": [
+    "alarms",
     "debugger",
     "scripting",
     "sidePanel",
@@ -21,9 +22,12 @@
     "storage",
     "tabGroups",
     "clipboardWrite",
+    "clipboardRead",
     "downloads",
     "tabCapture",
-    "offscreen"
+    "offscreen",
+    "bookmarks",
+    "history"
   ],
 
   "host_permissions": [
@@ -66,8 +70,18 @@
   },
 
   "content_security_policy": {
-    "extension_pages": "script-src 'self'; object-src 'self';"
+    "extension_pages": "script-src 'self'; object-src 'self'; connect-src 'self' https://api.anthropic.com https://api.openai.com https://generativelanguage.googleapis.com https://api.deepseek.com https://api.x.ai https://api.z.ai https://api.groq.com https://openrouter.ai http://127.0.0.1:* http://localhost:*;"
   },
+
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["canvas-hook.js"],
+      "run_at": "document_start",
+      "all_frames": true,
+      "world": "MAIN"
+    }
+  ],
 
   "minimum_chrome_version": "116"
 }

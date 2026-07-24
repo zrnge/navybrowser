@@ -11,6 +11,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 });
 
 async function captureAudio(streamId, durationMs) {
+  if (!durationMs || durationMs < 200) {
+    throw new Error(`durationMs must be at least 200ms (got ${durationMs})`);
+  }
   const stream = await navigator.mediaDevices.getUserMedia({
     audio: {
       mandatory: {
@@ -33,16 +36,25 @@ async function captureAudio(streamId, durationMs) {
   await new Promise(r => setTimeout(r, durationMs));
   recorder.stop();
   stream.getTracks().forEach(t => t.stop());
-  await new Promise(r => { recorder.onstop = r; });
+  await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("recorder onstop timeout")), 5000);
+    recorder.onstop  = () => { clearTimeout(timer); resolve(); };
+    recorder.onerror = (e) => { clearTimeout(timer); reject(e.error || new Error("recorder error")); };
+  });
 
   const blob = new Blob(chunks, { type: mimeType });
-  const buf  = await blob.arrayBuffer();
-  return arrayBufferToBase64(buf);
+  return blobToBase64(blob);
 }
 
-function arrayBufferToBase64(buffer) {
-  let binary = '';
-  const bytes = new Uint8Array(buffer);
-  for (let i = 0; i < bytes.byteLength; i++) binary += String.fromCharCode(bytes[i]);
-  return btoa(binary);
+function blobToBase64(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onloadend = () => {
+      const dataUrl = reader.result;
+      const base64 = dataUrl.split(",")[1];
+      resolve(base64);
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(blob);
+  });
 }

@@ -2,12 +2,12 @@
 // Supports: Ollama, LM Studio, Anthropic, OpenAI/ChatGPT, Google Gemini,
 //           DeepSeek, xAI/Grok, Groq, z.ai, and any custom OpenAI-compatible endpoint.
 
-const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]", "0.0.0.0"]);
+const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
 
 export const PROVIDER_PRESETS = {
   ollama:      { baseUrl: "http://127.0.0.1:11434/v1",                                label: "Ollama (local)",     apiType: "openai_compat", needsKey: false, defaultModel: "minicpm-v:8b" },
   lmstudio:    { baseUrl: "http://127.0.0.1:1234/v1",                                 label: "LM Studio (local)",  apiType: "openai_compat", needsKey: false, defaultModel: "local-model" },
-  anthropic:   { baseUrl: "https://api.anthropic.com",                                 label: "Anthropic Claude",   apiType: "anthropic",     needsKey: true,  defaultModel: "claude-sonnet-4-6" },
+  anthropic:   { baseUrl: "https://api.anthropic.com",                                 label: "Anthropic Claude",   apiType: "anthropic",     needsKey: true,  defaultModel: "claude-3-5-sonnet-latest" },
   openai:      { baseUrl: "https://api.openai.com/v1",                                 label: "OpenAI / ChatGPT",   apiType: "openai_compat", needsKey: true,  defaultModel: "gpt-4o" },
   gemini:      { baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai/",  label: "Google Gemini",      apiType: "openai_compat", needsKey: true,  defaultModel: "gemini-2.0-flash" },
   deepseek:    { baseUrl: "https://api.deepseek.com/v1",                               label: "DeepSeek",           apiType: "openai_compat", needsKey: true,  defaultModel: "deepseek-chat" },
@@ -22,9 +22,6 @@ export const PROVIDER_PRESETS = {
 // (cloud providers don't expose a /models endpoint we can easily scrape)
 export const CLOUD_MODEL_LISTS = {
   anthropic: [
-    "claude-opus-4-8",
-    "claude-sonnet-4-6",
-    "claude-haiku-4-5-20251001",
     "claude-3-5-sonnet-latest",
     "claude-3-5-haiku-latest",
     "claude-3-opus-latest",
@@ -72,6 +69,35 @@ export const CLOUD_MODEL_LISTS = {
   ],
 };
 
+
+// Vision/coordinate capability hints per provider/model.
+// Used by the agent to decide screenshot resolution, zoom crops, and coordinate precision.
+export const MODEL_CAPABILITIES = {
+  ollama:      { maxScreenshotLongEdge: 1280, sendZoomCrops: true,  smallCoordReasoning: false, note: "Local models vary; keep images moderate." },
+  lmstudio:    { maxScreenshotLongEdge: 1280, sendZoomCrops: true,  smallCoordReasoning: false, note: "Local models vary; keep images moderate." },
+  anthropic:   { maxScreenshotLongEdge: 1920, sendZoomCrops: true,  smallCoordReasoning: true,  note: "Strong vision and coordinate reasoning." },
+  openai:      { maxScreenshotLongEdge: 1920, sendZoomCrops: true,  smallCoordReasoning: true,  note: "Strong vision and coordinate reasoning." },
+  gemini:      { maxScreenshotLongEdge: 1920, sendZoomCrops: true,  smallCoordReasoning: true,  note: "Strong vision and coordinate reasoning." },
+  deepseek:    { maxScreenshotLongEdge: 1280, sendZoomCrops: false, smallCoordReasoning: false, note: "Text-focused provider; prefer SoM/ref over raw coordinates." },
+  xai:         { maxScreenshotLongEdge: 1920, sendZoomCrops: true,  smallCoordReasoning: true,  note: "Grok vision is good for coordinates." },
+  zai:         { maxScreenshotLongEdge: 1280, sendZoomCrops: true,  smallCoordReasoning: false, note: "Preview provider; use structured targets." },
+  groq:        { maxScreenshotLongEdge: 1280, sendZoomCrops: false, smallCoordReasoning: false, note: "Groq text models; avoid heavy vision loads." },
+  openrouter:  { maxScreenshotLongEdge: 1920, sendZoomCrops: true,  smallCoordReasoning: true,  note: "Depends on routed model; assume capable." },
+  custom:      { maxScreenshotLongEdge: 1280, sendZoomCrops: true,  smallCoordReasoning: false, note: "Custom endpoint; conservative defaults." },
+
+  "claude-3-5-sonnet-latest": { maxScreenshotLongEdge: 2048, sendZoomCrops: true, smallCoordReasoning: true, note: "Best for exact coordinates and tiny UI." },
+  "claude-3-5-haiku-latest": { maxScreenshotLongEdge: 1536, sendZoomCrops: true, smallCoordReasoning: true, note: "Good vision with lower latency." },
+  "claude-3-opus-latest":   { maxScreenshotLongEdge: 2048, sendZoomCrops: true, smallCoordReasoning: true, note: "Excellent vision precision." },
+  "gpt-4o":                  { maxScreenshotLongEdge: 2048, sendZoomCrops: true, smallCoordReasoning: true, note: "Excellent coordinate estimation." },
+  "gpt-4o-mini":             { maxScreenshotLongEdge: 1536, sendZoomCrops: true, smallCoordReasoning: false, note: "Good but verify small targets." },
+  "gemini-2.5-pro-exp-03-25": { maxScreenshotLongEdge: 2048, sendZoomCrops: true, smallCoordReasoning: true, note: "Excellent coordinate precision." },
+  "gemini-2.0-flash":        { maxScreenshotLongEdge: 1536, sendZoomCrops: true, smallCoordReasoning: true, note: "Fast vision, good coordinates." },
+  "deepseek-chat":           { maxScreenshotLongEdge: 1280, sendZoomCrops: false, smallCoordReasoning: false, note: "Text-only-ish; rely on structured refs." },
+  "deepseek-reasoner":       { maxScreenshotLongEdge: 1280, sendZoomCrops: false, smallCoordReasoning: false, note: "Text-only-ish; rely on structured refs." },
+  "grok-3-beta":             { maxScreenshotLongEdge: 1920, sendZoomCrops: true, smallCoordReasoning: true, note: "Good vision coordinates." },
+  "grok-3-mini-beta":        { maxScreenshotLongEdge: 1536, sendZoomCrops: true, smallCoordReasoning: false, note: "Acceptable for medium elements." },
+};
+
 function assertLoopback(url) {
   try {
     const host = new URL(url).hostname.toLowerCase();
@@ -83,13 +109,69 @@ function assertLoopback(url) {
   }
 }
 
+export function maskApiKeys(text) {
+  if (typeof text !== "string") return text;
+  return text.replace(/sk-[A-Za-z0-9-]{8,}/g, "<redacted>")
+             .replace(/AIza[A-Za-z0-9-_]{35}/g, "<redacted>");
+}
+
+async function fetchWithRetry(url, options, maxAttempts = 3) {
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const ctrl = new AbortController();
+    const timeoutId = setTimeout(() => ctrl.abort(), 120000);
+    const attemptOptions = { ...options, signal: ctrl.signal };
+
+    let resp;
+    try {
+      resp = await fetch(url, attemptOptions);
+    } catch (e) {
+      clearTimeout(timeoutId);
+      if (e.name === "AbortError" && attempt === maxAttempts) {
+        throw new Error("LLM request timed out after 120s — API did not respond");
+      }
+      if (attempt === maxAttempts) throw e;
+      await new Promise(r => setTimeout(r, 2000 * Math.pow(2, attempt - 1)));
+      continue;
+    }
+    
+    if (!resp.ok) {
+      const status = resp.status;
+      if ([429, 502, 503, 504, 529].includes(status) && attempt < maxAttempts) {
+        clearTimeout(timeoutId);
+        let delayMs = 2000 * Math.pow(2, attempt - 1);
+        const retryAfter = resp.headers.get("retry-after");
+        if (retryAfter) {
+          const parsed = parseInt(retryAfter, 10);
+          if (!isNaN(parsed) && parsed > 0 && parsed < 60) delayMs = parsed * 1000;
+        }
+        await new Promise(r => setTimeout(r, delayMs));
+        continue;
+      }
+      
+      clearTimeout(timeoutId);
+      const errText = await resp.text().catch(() => "");
+      throw new Error(`LLM HTTP ${status} from ${new URL(url).hostname}: ${maskApiKeys(errText).substring(0, 300)}`);
+    }
+    
+    resp.timeoutId = timeoutId;
+    return resp;
+  }
+}
+
 export function extractJson(raw) {
   raw = raw.trim();
   const candidates = [];
 
   function ingest(text) {
     try {
-      const obj = JSON.parse(text);
+      let obj = JSON.parse(text);
+      // Unwrap double/triple-stringified JSON — models sometimes emit a JSON
+      // string whose content is the actual JSON object.
+      let unwraps = 0;
+      while (typeof obj === "string" && unwraps < 3) {
+        obj = JSON.parse(obj);
+        unwraps++;
+      }
       if (obj && typeof obj === "object") {
         if (Array.isArray(obj)) {
           for (const item of obj) {
@@ -128,8 +210,30 @@ export function extractJson(raw) {
 
   // Prefer AgentStep format
   for (const c of candidates) {
-    if ("thought" in c && "action" in c) return c;
+    if ("thought" in c && c.action && typeof c.action === "object") return c;
   }
+
+  // AutoFix near-miss step shapes that smaller models commonly emit.
+  // Only action-like objects are rewritten — other extractJson consumers
+  // (intent classifier, completion validator, etc.) pass through untouched.
+  for (const c of candidates) {
+    // Action name as a string with params at top level: {"action":"click","x":..}
+    // subtask_complete is a top-level sibling of action — keep it there, don't fold it into action.
+    if (typeof c.action === "string") {
+      const { thought, reasoning, action, subtask_complete, ...rest } = c;
+      return { thought: thought || reasoning || "", subtask_complete, action: { type: action, ...rest } };
+    }
+    // Action fields emitted flat at top level: {"type":"click","x":..,"thought":".."}
+    if (typeof c.type === "string" && !("action" in c)) {
+      const { thought, subtask_complete, ...rest } = c;
+      return { thought: thought || rest.reasoning || "", subtask_complete, action: rest };
+    }
+    // Proper action object but the thought field was dropped
+    if (c.action && typeof c.action === "object" && typeof c.action.type === "string") {
+      return { thought: c.thought || c.reasoning || "", subtask_complete: c.subtask_complete, action: c.action };
+    }
+  }
+
   return candidates[0];
 }
 
@@ -151,19 +255,22 @@ function cleanOldUserPrompt(text) {
 
 function formatHistoryForClassifier(msg) {
   let text = "";
+  let images = [];
   if (Array.isArray(msg.content)) {
     const textBlock = msg.content.find(b => b.type === "text");
     text = textBlock ? textBlock.text : "";
+    images = msg.content.filter(b => b.type === "image_url" && b.is_user_upload);
   } else {
     text = msg.content || "";
   }
 
   if (msg.role === "user") {
     const goalMatch = text.match(/<USER_GOAL>([\s\S]*?)<\/USER_GOAL>/);
-    if (goalMatch) {
-      return { role: "user", content: goalMatch[1].trim() };
+    let extractedText = goalMatch ? goalMatch[1].trim() : cleanOldUserPrompt(text);
+    if (images.length > 0) {
+      return { role: "user", content: [{ type: "text", text: extractedText }, ...images] };
     }
-    return { role: "user", content: cleanOldUserPrompt(text) };
+    return { role: "user", content: extractedText };
   } else if (msg.role === "assistant") {
     try {
       const parsed = JSON.parse(text);
@@ -192,6 +299,37 @@ function formatHistoryForClassifier(msg) {
   return { role: msg.role, content: text };
 }
 
+// Extracts the assistant text from an OpenAI-compatible choice.
+//
+// Reasoning ("thinking") models — Kimi, Minimax, GLM, DeepSeek-R1 and friends, served
+// via Ollama/OpenRouter/vLLM — stream their chain-of-thought into a SEPARATE field
+// (`reasoning` / `reasoning_content`) and only then emit the answer in `content`. If the
+// token budget runs out mid-thought, `content` comes back as an EMPTY STRING with
+// finish_reason "length". Reading `.content` blindly then hands the agent "" — it sees
+// no action, retries, thinks again, and burns every step "planning" without ever
+// clicking. Surface that as an actionable error instead of failing silently.
+function _openAIContent(choice) {
+  const msg = (choice && choice.message) || {};
+  const text = typeof msg.content === "string" ? msg.content : "";
+  if (text.trim()) return text;
+
+  const thought = msg.reasoning || msg.reasoning_content || "";
+  if (choice && choice.finish_reason === "length") {
+    throw new Error(
+      "Model hit the output token limit before producing an action" +
+      (thought ? " (it spent the whole budget on internal reasoning)" : "") +
+      ". Raise Max Output Tokens in Settings — reasoning models need ~4096+."
+    );
+  }
+  if (thought.trim()) {
+    throw new Error(
+      "Model returned only internal reasoning and no action. " +
+      "Raise Max Output Tokens in Settings — reasoning models need ~4096+."
+    );
+  }
+  return text;
+}
+
 export class LocalLLM {
   constructor(config = {}) {
     // Provider resolution: explicit > inferred from anthropicKey (backward compat)
@@ -207,7 +345,7 @@ export class LocalLLM {
     this.apiKey         = config.apiKey  || config.anthropicKey || "";
     this.model          = config.model   || preset.defaultModel || "minicpm-v:8b";
     this.temperature    = config.temperature !== undefined ? config.temperature : 0.2;
-    this.maxTokens      = config.maxTokens || 2048;
+    this.maxTokens      = config.maxTokens != null ? config.maxTokens : 4096;
     this.jsonMode       = config.jsonMode  || false;
     this.apiType        = preset.apiType   || "openai_compat";
     this.uncensored     = config.uncensored || false;
@@ -231,26 +369,51 @@ export class LocalLLM {
     return !["groq", "deepseek"].includes(this.provider);
   }
 
-  async chat(system, user, images = null) {
+  // Resolve capability profile for this model, falling back to provider defaults.
+  getCapability() {
+    const key = (this.model || "").toLowerCase();
+    const provider = this.provider || "custom";
+    const fallback = MODEL_CAPABILITIES[provider] || MODEL_CAPABILITIES.custom;
+    const override = MODEL_CAPABILITIES[key];
+    return override ? { ...fallback, ...override, source: "model" } : { ...fallback, source: "provider" };
+  }
+
+  // Strip image content blocks from a messages array for text-only models —
+  // sending them produces HTTP 400 (e.g. DeepSeek: unknown variant `image_url`).
+  // A text marker replaces an all-image turn so the message structure stays valid.
+  _stripImageBlocks(messages) {
+    return messages.map(msg => {
+      if (!Array.isArray(msg.content)) return msg;
+      const kept = msg.content.filter(b => b.type !== "image_url" && b.type !== "image");
+      if (kept.length === msg.content.length) return msg;
+      if (kept.length === 0) return { ...msg, content: "[screenshot omitted — this model does not accept images]" };
+      return { ...msg, content: kept };
+    });
+  }
+
+  async chat(system, user, images = null, forceJsonMode = false) {
+    // Text-only providers reject image blocks — degrade to text instead of failing the call.
+    if (images && images.length > 0 && !this.supportsVision) images = null;
     if (this.provider === "anthropic" || this.apiType === "anthropic") {
-      return this.chatAnthropic(system, user, images);
+      return this.chatAnthropic(system, user, images, forceJsonMode);
     }
-    return this.chatOpenAICompat(system, user, images);
+    return this.chatOpenAICompat(system, user, images, forceJsonMode);
   }
 
   // Multi-turn: accepts a full messages array [{role, content}] already assembled
   // by the caller. Returns { text, tokensIn, tokensOut }.
-  async chatMultiTurn(system, messages, onToken = null) {
+  async chatMultiTurn(system, messages, onToken = null, forceJsonMode = false) {
+    if (!this.supportsVision) messages = this._stripImageBlocks(messages);
     if (onToken) {
       if (this.provider === "anthropic" || this.apiType === "anthropic") {
-        return this._chatMultiTurnAnthropicStream(system, messages, onToken);
+        return this._chatMultiTurnAnthropicStream(system, messages, onToken, forceJsonMode);
       }
-      return this._chatMultiTurnOpenAIStream(system, messages, onToken);
+      return this._chatMultiTurnOpenAIStream(system, messages, onToken, forceJsonMode);
     }
     if (this.provider === "anthropic" || this.apiType === "anthropic") {
-      return this._chatMultiTurnAnthropic(system, messages);
+      return this._chatMultiTurnAnthropic(system, messages, forceJsonMode);
     }
-    return this._chatMultiTurnOpenAI(system, messages);
+    return this._chatMultiTurnOpenAI(system, messages, forceJsonMode);
   }
 
   async _chatMultiTurnOpenAIStream(system, messages, onToken) {
@@ -269,21 +432,8 @@ export class LocalLLM {
       headers["X-Title"] = "Navy Browser Agent";
     }
 
-    const ctrl = new AbortController();
-    const timeoutId = setTimeout(() => ctrl.abort(), 120000);
-    let resp;
-    try {
-      resp = await fetch(url, { method: "POST", headers, body: JSON.stringify(body), signal: ctrl.signal });
-    } catch (e) {
-      clearTimeout(timeoutId);
-      if (e.name === "AbortError") throw new Error("LLM request timed out after 120s — API did not respond");
-      throw e;
-    }
-    if (!resp.ok) {
-      clearTimeout(timeoutId);
-      const errText = await resp.text().catch(() => "");
-      throw new Error(`LLM HTTP ${resp.status} from ${new URL(url).hostname}: ${errText.substring(0, 300)}`);
-    }
+    const resp = await fetchWithRetry(url, { method: "POST", headers, body: JSON.stringify(body) });
+    const timeoutId = resp.timeoutId;
 
     const reader  = resp.body.getReader();
     const decoder = new TextDecoder();
@@ -296,12 +446,16 @@ export class LocalLLM {
         const { done, value } = await reader.read();
         if (done) break;
         buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split("\n");
-        buffer = lines.pop() || "";
-        for (const line of lines) {
-          if (!line.startsWith("data: ")) continue;
-          const data = line.slice(6).trim();
-          if (data === "[DONE]") continue;
+        const events = buffer.split("\n\n");
+        buffer = events.pop() || "";
+        for (const event of events) {
+          const lines = event.split("\n");
+          let data = "";
+          for (const line of lines) {
+            if (line.startsWith("data: ")) data += line.slice(6);
+          }
+          data = data.trim();
+          if (!data || data === "[DONE]") continue;
           try {
             const chunk = JSON.parse(data);
             // Detect provider error objects sent inside the stream
@@ -343,7 +497,7 @@ export class LocalLLM {
       return { ...msg, content };
     });
     const body = {
-      model: this.model || "claude-sonnet-4-6",
+      model: this.model || "claude-3-5-sonnet-latest",
       system,
       messages: convertedMessages,
       max_tokens: this.maxTokens,
@@ -361,23 +515,10 @@ export class LocalLLM {
       headers["anthropic-beta"] = "interleaved-thinking-2025-05-14";
     }
 
-    const ctrl = new AbortController();
-    const timeoutId = setTimeout(() => ctrl.abort(), 120000);
-    let resp;
-    try {
-      resp = await fetch("https://api.anthropic.com/v1/messages", {
-        method: "POST", headers, body: JSON.stringify(body), signal: ctrl.signal,
-      });
-    } catch (e) {
-      clearTimeout(timeoutId);
-      if (e.name === "AbortError") throw new Error("LLM request timed out after 120s — Anthropic API did not respond");
-      throw e;
-    }
-    if (!resp.ok) {
-      clearTimeout(timeoutId);
-      const errText = await resp.text().catch(() => "");
-      throw new Error(`Anthropic HTTP ${resp.status}: ${errText.substring(0, 300)}`);
-    }
+    const resp = await fetchWithRetry("https://api.anthropic.com/v1/messages", {
+      method: "POST", headers, body: JSON.stringify(body),
+    });
+    const timeoutId = resp.timeoutId;
 
     const reader  = resp.body.getReader();
     const decoder = new TextDecoder();
@@ -391,11 +532,16 @@ export class LocalLLM {
         const { done, value } = await reader.read();
         if (done) break;
         buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split("\n");
-        buffer = lines.pop() || "";
-        for (const line of lines) {
-          if (!line.startsWith("data: ")) continue;
-          const data = line.slice(6).trim();
+        const events = buffer.split("\n\n");
+        buffer = events.pop() || "";
+        for (const event of events) {
+          const lines = event.split("\n");
+          let data = "";
+          for (const line of lines) {
+            if (line.startsWith("data: ")) data += line.slice(6);
+          }
+          data = data.trim();
+          if (!data) continue;
           try {
             const evt = JSON.parse(data);
             if (evt.type === "error") {
@@ -427,14 +573,14 @@ export class LocalLLM {
     return { text: fullText, tokensIn: inputTokens, tokensOut: outputTokens };
   }
 
-  async _chatMultiTurnOpenAI(system, messages) {
+  async _chatMultiTurnOpenAI(system, messages, forceJsonMode = false) {
     const body = {
       model: this.model,
       messages: [{ role: "system", content: system }, ...messages],
       temperature: this.temperature,
       max_tokens: this.maxTokens,
     };
-    if (this.jsonMode) body.response_format = { type: "json_object" };
+    if (this.jsonMode || forceJsonMode) body.response_format = { type: "json_object" };
     const url     = `${this.baseUrl.replace(/\/$/, "")}/chat/completions`;
     const headers = { "Content-Type": "application/json" };
     if (this.apiKey) headers["Authorization"] = `Bearer ${this.apiKey}`;
@@ -443,21 +589,8 @@ export class LocalLLM {
       headers["X-Title"] = "Navy Browser Agent";
     }
 
-    const ctrl = new AbortController();
-    const timeoutId = setTimeout(() => ctrl.abort(), 120000);
-    let resp;
-    try {
-      resp = await fetch(url, { method: "POST", headers, body: JSON.stringify(body), signal: ctrl.signal });
-    } catch (e) {
-      clearTimeout(timeoutId);
-      if (e.name === "AbortError") throw new Error("LLM request timed out after 120s — API did not respond");
-      throw e;
-    }
-    if (!resp.ok) {
-      clearTimeout(timeoutId);
-      const errText = await resp.text().catch(() => "");
-      throw new Error(`LLM HTTP ${resp.status} from ${new URL(url).hostname}: ${errText.substring(0, 300)}`);
-    }
+    const resp = await fetchWithRetry(url, { method: "POST", headers, body: JSON.stringify(body) });
+    const timeoutId = resp.timeoutId;
     let data;
     try {
       data = await resp.json();
@@ -468,9 +601,10 @@ export class LocalLLM {
     }
     clearTimeout(timeoutId);
     if (!data.choices || data.choices.length === 0) throw new Error("LLM response has empty choices");
+    const text = _openAIContent(data.choices[0]);
     return {
-      text: data.choices[0].message.content,
-      content: [{ type: "text", text: data.choices[0].message.content }],
+      text,
+      content: [{ type: "text", text }],
       tokensIn:  data.usage?.prompt_tokens     || 0,
       tokensOut: data.usage?.completion_tokens || 0,
     };
@@ -490,7 +624,7 @@ export class LocalLLM {
       return { ...msg, content };
     });
     const body = {
-      model: this.model || "claude-sonnet-4-6",
+      model: this.model || "claude-3-5-sonnet-latest",
       system,
       messages: convertedMessages,
       max_tokens: this.maxTokens,
@@ -507,23 +641,10 @@ export class LocalLLM {
       headers["anthropic-beta"] = "interleaved-thinking-2025-05-14";
     }
 
-    const ctrl = new AbortController();
-    const timeoutId = setTimeout(() => ctrl.abort(), 120000);
-    let resp;
-    try {
-      resp = await fetch("https://api.anthropic.com/v1/messages", {
-        method: "POST", headers, body: JSON.stringify(body), signal: ctrl.signal,
-      });
-    } catch (e) {
-      clearTimeout(timeoutId);
-      if (e.name === "AbortError") throw new Error("LLM request timed out after 120s — Anthropic API did not respond");
-      throw e;
-    }
-    if (!resp.ok) {
-      clearTimeout(timeoutId);
-      const errText = await resp.text().catch(() => "");
-      throw new Error(`Anthropic HTTP ${resp.status}: ${errText.substring(0, 300)}`);
-    }
+    const resp = await fetchWithRetry("https://api.anthropic.com/v1/messages", {
+      method: "POST", headers, body: JSON.stringify(body),
+    });
+    const timeoutId = resp.timeoutId;
     let data;
     try {
       data = await resp.json();
@@ -544,7 +665,7 @@ export class LocalLLM {
     };
   }
 
-  async chatOpenAICompat(system, user, images = null) {
+  async chatOpenAICompat(system, user, images = null, forceJsonMode = false) {
     const messages = [{ role: "system", content: system }];
     if (images && images.length > 0) {
       const content = [{ type: "text", text: user }];
@@ -560,7 +681,7 @@ export class LocalLLM {
       temperature: this.temperature,
       max_tokens: this.maxTokens,
     };
-    if (this.jsonMode) body.response_format = { type: "json_object" };
+    if (this.jsonMode || forceJsonMode) body.response_format = { type: "json_object" };
 
     const url     = `${this.baseUrl.replace(/\/$/, "")}/chat/completions`;
     const headers = { "Content-Type": "application/json" };
@@ -570,15 +691,30 @@ export class LocalLLM {
       headers["X-Title"] = "Navy Browser Agent";
     }
 
-    const resp = await fetch(url, { method: "POST", headers, body: JSON.stringify(body) });
-    if (!resp.ok) {
-      const errText = await resp.text().catch(() => "");
-      throw new Error(`LLM HTTP ${resp.status} from ${new URL(url).hostname}: ${errText.substring(0, 300)}`);
+    let resp;
+    try {
+      resp = await fetchWithRetry(url, { method: "POST", headers, body: JSON.stringify(body) });
+    } catch (e) {
+      // Behavioral fallback: some models are text-only even when the provider is
+      // assumed vision-capable (local Ollama text models, custom endpoints). If the
+      // API rejected the image blocks with a 400, retry once without them.
+      const msg = String((e && e.message) || "");
+      if (images && images.length > 0 && /\b400\b/.test(msg) && /image_url|image|multimodal|vision/i.test(msg)) {
+        return this.chatOpenAICompat(
+          system,
+          user + "\n\n[Note: a screenshot was available but this model does not accept images — reason from the page text above only.]",
+          null,
+          forceJsonMode
+        );
+      }
+      throw e;
     }
+    const timeoutId = resp.timeoutId;
+    clearTimeout(timeoutId);
 
     const data = await resp.json();
     if (!data.choices || data.choices.length === 0) throw new Error("LLM response has empty choices");
-    return data.choices[0].message.content;
+    return _openAIContent(data.choices[0]);
   }
 
   async chatAnthropic(system, user, images = null) {
@@ -592,7 +728,7 @@ export class LocalLLM {
     content.push({ type: "text", text: user });
 
     const body = {
-      model: this.model || "claude-sonnet-4-6",
+      model: this.model || "claude-3-5-sonnet-latest",
       messages: [{ role: "user", content }],
       system,
       max_tokens: this.maxTokens,
@@ -613,16 +749,13 @@ export class LocalLLM {
       headers["anthropic-beta"] = "interleaved-thinking-2025-05-14";
     }
 
-    const resp = await fetch("https://api.anthropic.com/v1/messages", {
+    const resp = await fetchWithRetry("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers,
       body: JSON.stringify(body),
     });
-
-    if (!resp.ok) {
-      const errText = await resp.text().catch(() => "");
-      throw new Error(`Anthropic HTTP ${resp.status}: ${errText.substring(0, 300)}`);
-    }
+    const timeoutId = resp.timeoutId;
+    clearTimeout(timeoutId);
 
     const data = await resp.json();
     if (!data.content || data.content.length === 0) throw new Error("Anthropic response has empty content");
@@ -659,7 +792,7 @@ export class LocalLLM {
    * For chat intents, also returns the conversational reply in one round-trip.
    * No screenshots or page state needed — lightweight and fast.
    */
-  async classify(userMessage, conversationMessages = []) {
+  async classify(userMessage, conversationMessages = [], attachedImages = []) {
     const classifySystem =
       `You are an intent router for Navy, a browser automation agent. ` +
       `The user typed a message. Route it to one of two intents:\n` +
@@ -686,20 +819,30 @@ export class LocalLLM {
     try {
       // Use a non-JSON-mode call to be compatible with all providers,
       // then parse the JSON from the response.
-      const savedJsonMode = this.jsonMode;
-      this.jsonMode = true;
       let raw;
       try {
+        let finalUserContent = userMessage;
+        if (attachedImages && attachedImages.length > 0 && this.supportsVision) {
+          finalUserContent = [{ type: "text", text: userMessage }];
+          for (const img of attachedImages) {
+            finalUserContent.push({ type: "image_url", image_url: { url: img } });
+          }
+        }
+
         if (conversationMessages && conversationMessages.length > 0) {
           const formatted = conversationMessages.map(formatHistoryForClassifier);
-          formatted.push({ role: "user", content: userMessage });
-          const planRes = await this.chatMultiTurn(classifySystem, formatted);
+          formatted.push({ role: "user", content: finalUserContent });
+          const planRes = await this.chatMultiTurn(classifySystem, formatted, null, true);
           raw = planRes.text;
         } else {
-          raw = await this.chat(classifySystem, userMessage);
+          if (Array.isArray(finalUserContent)) {
+            const planRes = await this.chatMultiTurn(classifySystem, [{ role: "user", content: finalUserContent }], null, true);
+            raw = planRes.text;
+          } else {
+            raw = await this.chat(classifySystem, userMessage, null, true);
+          }
         }
       } finally {
-        this.jsonMode = savedJsonMode;
       }
 
       // Parse the response
@@ -866,6 +1009,7 @@ export class LocalLLM {
     let lastError = null;
     let contextOverflow = false;
     let messages = conversationMessages;
+    let retryCorrections = [];
 
     for (let attempt = 0; attempt < 3; attempt++) {
       if (contextOverflow) {
@@ -883,7 +1027,7 @@ export class LocalLLM {
 
       let result;
       try {
-        result = await this.chatMultiTurn(system, messages, onToken);
+        result = await this.chatMultiTurn(system, [...messages, ...retryCorrections], onToken);
       } catch (apiErr) {
         const msg = (apiErr.message || "").toLowerCase();
         const isCtx = msg.includes("too long") || msg.includes("context_length") ||
@@ -902,8 +1046,8 @@ export class LocalLLM {
           // The model produced non-JSON text (e.g. a plain-text refusal or explanation).
           // Push a correction as an assistant+user turn so the next attempt gets the feedback.
           if (attempt < 2) {
-            messages = [
-              ...messages,
+            retryCorrections = [
+              ...retryCorrections,
               { role: "assistant", content: [{ type: "text", text: result.text }] },
               { role: "user", content: [{ type: "text", text:
                 "ERROR: Your response was not valid JSON. You MUST output ONLY a JSON object matching the schema in the system prompt. " +

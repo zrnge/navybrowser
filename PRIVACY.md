@@ -1,7 +1,7 @@
 # Navy — Privacy Policy
 
 **Effective date:** 2025-06-20  
-**Extension:** Navy v0.1.0  
+**Extension:** Navy v0.1.1  
 **Developer:** Zrnge — [https://github.com/zrnge/navybrowser](https://github.com/zrnge/navybrowser)
 
 ---
@@ -29,11 +29,11 @@ When you run an automation task, Navy collects the following from the active bro
 | **Conversation history** | The sequence of steps Navy has taken in the current task | AI multi-step planning |
 
 Navy does **not** access:
-- Other tabs beyond the one currently being automated (unless you ask Navy to switch tabs)
-- Your browser history
+- Other tabs beyond the one currently being automated (unless you ask Navy to switch or list tabs)
+- Your browser history or bookmarks (unless you explicitly request a history search or bookmark action as part of a task)
 - Saved passwords or the password manager
 - Files on your local machine
-- Your camera or microphone
+- Your camera or microphone (web speech recognition runs entirely client-side via Web Speech API)
 
 ---
 
@@ -76,7 +76,7 @@ Navy stores the following data on your device using Chrome's extension storage A
 | **AI provider settings** (provider name, model name, base URL) | `chrome.storage.local` | Until you change or clear settings |
 | **API key** | `chrome.storage.local` | Until you remove it. Never logged or transmitted anywhere other than the configured API endpoint. |
 | **Task audit log** | `chrome.storage.local` | Last 1,000 task step entries. Automatically rotated. Credential-looking values (detected by pattern) are SHA-256 hashed before being written. |
-| **Chat history** | `chrome.storage.session` | Current browser session only. Cleared when the browser closes. |
+| **Chat history** | `chrome.storage.local` | Cleared at the start of each new task. Not synced via Chrome Sync. |
 | **Debug logs** | `chrome.storage.local` | Last 500 log entries. Exportable by you via the Settings panel. |
 
 None of this data is synced to Chrome Sync or transmitted anywhere by Navy.
@@ -106,10 +106,11 @@ Navy requests the following Chrome permissions:
 | `sidePanel` | Displays the Navy control panel in Chrome's side panel |
 | `tabCapture` | Captures audio from the active tab for the "listen" action (audio CAPTCHAs, spoken content) |
 | `offscreen` | Runs audio recording in an offscreen document (required by Chrome for MediaRecorder in service workers) |
-| `alarms` | Schedules watchdog checks for the debugger connection |
 | `tabGroups` | Organizes Navy's working tabs into a Chrome tab group for cleaner UX |
 | `clipboardWrite` | Lets you copy task results to the clipboard |
 | `downloads` | Exports debug logs when you click "Export Debug Logs" in Settings |
+| `bookmarks` | Searches, adds, or deletes bookmarks upon your direct instruction |
+| `history` | Searches local browser history when explicitly requested (e.g., to find a past link) |
 
 The `debugger` permission is attached only to the tab currently being automated. It is detached when the task ends, when you press the panic-stop shortcut (Ctrl+Shift+.), or when the tab is closed.
 
@@ -117,7 +118,7 @@ The `debugger` permission is attached only to the tab currently being automated.
 
 ## 6. What Navy Never Does
 
-- Never reads or stores your browser history
+- Never reads, modifies, or stores your browser history or bookmarks except for temporary local query/management when explicitly instructed by your goals
 - Never accesses saved passwords
 - Never transmits data to the extension developer (Zrnge)
 - Never runs analytics or telemetry of any kind
